@@ -1,0 +1,63 @@
+# =========================
+# Secrets / env
+# =========================
+.env
+.env.*
+orchestrator/**/credentials.json
+orchestrator/**/token*.json
+
+# =========================
+# Runtime data
+# =========================
+orchestrator_data/
+orchestrator/data/
+data/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# =========================
+# Pytest / coverage
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# Build / packaging
+# =========================
+build/
+dist/
+
+# =========================
+# Factur-X artifacts (runtime)
+# =========================
+artifacts/
+outputs/
+generated/
+ci_extracted_xml/
+
+# ⚠️ Ne pas committer de vraies factures
+*.pdf
+*.xml

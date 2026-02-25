@@ -1,0 +1,12 @@
+# Orchestrateur LangGraph : dépendances Python
+
+# LangGraph (framework de workflow par graphe)
+langgraph>=0.2
+
+# Google APIs (Gmail + Drive)
+google-api-python-client>=2.100
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2
+
+# HTTP client (appel au micro-service Factur-X)
+requests>=2.31

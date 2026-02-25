@@ -1,0 +1,39 @@
+name: Validate Factur-X (PDF/A + XML)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pypdf lxml
+
+      - name: Validate PDF/A with veraPDF
+        run: |
+          shopt -s globstar nullglob
+          PDFs=(tests/**/*.pdf)
+          if [ ${#PDFs[@]} -eq 0 ]; then
+            echo "No test PDFs found, skipping veraPDF."
+            exit 0
+          fi
+          docker run --rm -v "$PWD:/data" -w /data verapdf/cli \
+            verapdf --format text "${PDFs[@]}"
+
+      - name: Validate embedded Factur-X XML
+        run: |
+          python tools/ci_validate_facturx.py
