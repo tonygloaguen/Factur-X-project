@@ -5,6 +5,8 @@
 .env.*
 orchestrator/**/credentials.json
 orchestrator/**/token*.json
+orchestrator/gmail_token.json
+
 
 # =========================
 # Runtime data
