@@ -1,12 +1,27 @@
-# Orchestrateur LangGraph : dépendances Python
+# Orchestrateur LangGraph Factur-X — Dépendances Python
+# =======================================================
+# Anciennement 2 services (orchestrateur + Flask) → maintenant 1 seul.
+# Ces dépendances couvrent l'ensemble du pipeline.
 
-# LangGraph (framework de workflow par graphe)
+# ── LangGraph (framework de workflow par graphe) ─────────────────────────────
 langgraph>=0.2
 
-# Google APIs (Gmail + Drive)
+# ── Google APIs (Gmail + Drive, OAuth2) ──────────────────────────────────────
 google-api-python-client>=2.100
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.2
 
-# HTTP client (appel au micro-service Factur-X)
+# ── HTTP client (appels API Gemini) ──────────────────────────────────────────
 requests>=2.31
+
+# ── PDF & OCR ─────────────────────────────────────────────────────────────────
+# PyMuPDF : extraction texte natif + interface Tesseract OCR (sans écrire sur disque)
+PyMuPDF>=1.24
+# pypdf : manipulation PDF (injection OutputIntent + XMP pour PDF/A-3b)
+pypdf>=4.0
+
+# ── Factur-X (norme européenne EN 16931) ─────────────────────────────────────
+# Lib Akretion : embedding XML dans PDF, génération PDF/A-3, validation XSD
+factur-x>=3.10
+# lxml : génération XML (CII D16B/D22B avec namespaces)
+lxml>=5.0

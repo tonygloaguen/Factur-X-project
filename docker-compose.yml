@@ -1,79 +1,61 @@
 # docker-compose.yml
-# Stack allégée : Orchestrateur LangGraph + Micro-service Factur-X
-# ================================================================
+# Orchestrateur LangGraph Factur-X — Architecture unifiée
+# ========================================================
 #
-# Seulement 2 conteneurs
+# Refactoring : 2 containers → 1 container
+# Avant : orchestrateur (LangGraph) + facturx-service (Flask HTTP)
+# Après : orchestrateur LangGraph pur (9 nœuds, 0 appel HTTP interne)
 #
-# Démarrage : docker compose up -d --build
-# Logs :      docker compose logs -f
-# Test :      curl http://localhost:5000/health
+# Démarrage  : docker compose up -d --build
+# Logs       : docker compose logs -f
+# Arrêt      : docker compose down
 
 services:
-  # -------------------------------------------------------
-  # Micro-service Factur-X (OCR + Gemini + Factur-X)
-  # -------------------------------------------------------
-  facturx-service:
-    build:
-      context: ./facturx-service
-      dockerfile: Dockerfile
-    container_name: facturx-service
-    ports:
-      - "5000:5000"
-    environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
-      - FACTURX_PROFILE=${FACTURX_PROFILE:-en16931}
-      - PORT=5000
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - facturx-net
-
-  # -------------------------------------------------------
-  # Orchestrateur LangGraph
-  # -------------------------------------------------------
+  # ─────────────────────────────────────────────────────────────────────────
+  # Orchestrateur LangGraph Factur-X
+  #   Workflow : poll Gmail → OCR → Gemini → XML EN16931 → PDF/A-3 → Drive
+  # ─────────────────────────────────────────────────────────────────────────
   orchestrator:
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
     container_name: orchestrator
     environment:
-      # URL interne du micro-service Factur-X (réseau Docker)
-      - FACTURX_SERVICE_URL=http://facturx-service:5000
-      # Intervalle de polling Gmail en secondes (900 = 15 min)
-      - POLL_INTERVAL=${POLL_INTERVAL:-900}
-      # ID du dossier racine Google Drive "Relevés bancaires et factures"
+      # ── IA Gemini (requis) ───────────────────────────────────────────────
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      # Profil Factur-X : DOIT être exactement "en16931" (minuscules)
+      - FACTURX_PROFILE=${FACTURX_PROFILE:-en16931}
+
+      # ── Google Drive ─────────────────────────────────────────────────────
+      # ID du dossier racine Drive (extrait de l'URL, pas l'URL entière)
       - DRIVE_FOLDER_ID=${DRIVE_FOLDER_ID:-}
-      # Label Gmail (optionnel – plus utilisé si SQLite est actif)
+
+      # ── Gmail ────────────────────────────────────────────────────────────
+      # Intervalle de polling en secondes (900 = 15 minutes)
+      - POLL_INTERVAL=${POLL_INTERVAL:-900}
+      # Label appliqué aux emails traités
       - GMAIL_LABEL=${GMAIL_LABEL:-Factures-Traitées}
-      # Filtre Gmail (listing uniquement, pas de tri métier)
+      # Requête Gmail pour trouver les factures non-traitées
       - GMAIL_QUERY=${GMAIL_QUERY:-has:attachment filename:pdf -label:Factures-Traitées}
-      # SQLite state (anti-retraitement)
+
+      # ── SQLite (anti-retraitement + suivi quota) ─────────────────────────
       - STATE_DB_PATH=/app/data/state.db
-      # Throttling / quotas Gemini
+
+      # ── Throttling Gemini (tier gratuit) ─────────────────────────────────
+      # Max emails traités par cycle de polling
       - MAX_EMAILS_PER_CYCLE=${MAX_EMAILS_PER_CYCLE:-3}
+      # Pause minimum entre 2 appels Gemini (secondes)
       - MIN_SECONDS_BETWEEN_CALLS=${MIN_SECONDS_BETWEEN_CALLS:-15}
+      # Quota journalier Gemini (tier gratuit ≈ 18 appels/jour)
       - MAX_GEMINI_REQUESTS_PER_DAY=${MAX_GEMINI_REQUESTS_PER_DAY:-18}
+
     volumes:
-      # Credentials Google OAuth
+      # Credentials Google OAuth2 (fichier téléchargé depuis Google Cloud Console)
       - ./orchestrator/credentials.json:/app/credentials.json:ro
+      # Token OAuth2 (généré automatiquement à la première connexion)
       - ./orchestrator/token.json:/app/token.json
-      # Volume persistant pour SQLite
+      # Volume persistant pour la base SQLite (survit aux redémarrages)
       - ./orchestrator_data:/app/data
-    depends_on:
-      facturx-service:
-        condition: service_healthy
+
     restart: unless-stopped
-    networks:
-      - facturx-net
-
-networks:
-  facturx-net:
-    driver: bridge
-
-volumes:
-  orchestrator_data:
