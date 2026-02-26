@@ -615,7 +615,7 @@ cd Factur-X-project
 
 # 5. Créer le répertoire de données
 mkdir -p orchestrator_data       # Linux/Mac
-# New-Item -ItemType Directory -Force -Path orchestrator_data   # Windows
+New-Item -ItemType Directory -Force -Path orchestrator_data   # Windows
 
 # 6. Lancer
 docker compose up -d --build
