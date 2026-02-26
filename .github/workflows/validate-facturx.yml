@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# CKV2_GHA_1 : permissions minimales explicites (principe du moindre privilège)
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest

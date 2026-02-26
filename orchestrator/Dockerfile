@@ -23,6 +23,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copier tous les modules Python de l'orchestrateur
 COPY state.py services.py facturx_utils.py nodes.py graph.py main.py ./
 
+# CKV_DOCKER_3 : créer un utilisateur non-root pour limiter la surface d'attaque
+RUN useradd -r -u 1001 -s /sbin/nologin appuser
+USER appuser
+
+# CKV_DOCKER_2 : vérification que le process Python est bien vivant
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
 # L'orchestrateur tourne en continu (boucle de polling toutes les N secondes)
 # -u : unbuffered stdout/stderr pour voir les logs en temps réel
 CMD ["python", "-u", "main.py"]
