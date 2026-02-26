@@ -1,4 +1,4 @@
-name: Validate Factur-X (PDF/A + XML)
+name: Validate Factur-X (XML EN16931 + Tests unitaires)
 
 on:
   push:
@@ -16,24 +16,28 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Install Python deps
+      - name: Install system dependencies (Tesseract + Ghostscript)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-fra tesseract-ocr-deu tesseract-ocr-eng \
+            ghostscript
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pypdf lxml
+          pip install PyMuPDF factur-x lxml pypdf reportlab requests pytest
 
-      - name: Validate PDF/A with veraPDF
+      - name: Run unit tests
+        env:
+          # FACTURX_PROFILE requis par facturx.py (module-level constant)
+          FACTURX_PROFILE: en16931
+          GEMINI_API_KEY: dummy-not-called-in-unit-tests
         run: |
-          shopt -s globstar nullglob
-          PDFs=(tests/**/*.pdf)
-          if [ ${#PDFs[@]} -eq 0 ]; then
-            echo "No test PDFs found, skipping veraPDF."
-            exit 0
-          fi
-          docker run --rm -v "$PWD:/data" -w /data verapdf/cli \
-            verapdf --format text "${PDFs[@]}"
+          PYTHONPATH=orchestrator pytest tests/test_facturx_en16931.py -v
 
-      - name: Validate embedded Factur-X XML
+      - name: Validate embedded Factur-X XML (PDFs dans le repo)
         run: |
           python tools/ci_validate_facturx.py

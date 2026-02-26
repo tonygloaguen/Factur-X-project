@@ -1,11 +1,15 @@
 import io
 import os
+import sys
 
 import pytest
 import fitz  # PyMuPDF
 from reportlab.pdfgen import canvas
 
-import app as facturx_app
+# Ajoute orchestrator/ au path pour importer facturx.py directement
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
+
+import facturx_utils as facturx_module
 
 
 def _make_minimal_pdf_bytes() -> bytes:
@@ -81,16 +85,16 @@ def _minimal_invoice_data_en16931() -> dict:
 
 
 def test_pdf_to_facturx_en16931_embeds_xml():
-    # force le profil pour ce test (au cas où l'env diffère)
-    facturx_app.FACTURX_PROFILE = "en16931"
+    # Force le profil pour ce test (au cas où l'env diffère)
+    facturx_module.FACTURX_PROFILE = "en16931"
 
     pdf_bytes = _make_minimal_pdf_bytes()
     inv = _minimal_invoice_data_en16931()
 
-    xml_bytes = facturx_app.generate_facturx_xml_en16931(inv)
+    xml_bytes = facturx_module.generate_facturx_xml_en16931(inv)
     assert xml_bytes.startswith(b"<?xml")
 
-    facturx_pdf = facturx_app.embed_facturx_in_pdf(pdf_bytes, xml_bytes)
+    facturx_pdf = facturx_module.embed_facturx_in_pdf(pdf_bytes, xml_bytes)
 
     # Vérifs de base PDF
     assert facturx_pdf[:4] == b"%PDF"
@@ -98,7 +102,6 @@ def test_pdf_to_facturx_en16931_embeds_xml():
     # Vérifie qu'un fichier est embarqué (XML Factur-X)
     doc = fitz.open(stream=facturx_pdf, filetype="pdf")
     try:
-        # API PyMuPDF : fichiers embarqués
         count = doc.embfile_count()
         assert count >= 1, "Aucun fichier embarqué trouvé dans le PDF Factur-X"
 
