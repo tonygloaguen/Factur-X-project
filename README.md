@@ -1,643 +1,799 @@
-# Runbook : Workflow Factures LangGraph — Guide complet
+# Factur-X Automation — LangGraph + Gemini + Google APIs
 
-*Version 4.0 — 25 février 2026*
-*Refactoring : architecture unifiée LangGraph pur — 1 conteneur, 9 nœuds, 0 microservice HTTP*
+> Automatisation complète du traitement des factures fournisseurs :
+> **Gmail → OCR → Gemini → XML EN16931 → PDF/A-3 → Google Drive**
+>
+> Architecture : **1 conteneur Docker**, **9 nœuds LangGraph**, **Pure Python**
 
----
-
-## Ce document, c'est quoi ?
-
-Un **runbook**, c'est un guide pas-à-pas qu'on suit dans l'ordre pour réaliser une opération technique. Celui-ci couvre :
-
-1. **Comprendre** l'architecture
-2. **Nettoyer** l'ancienne stack
-3. **Installer** la nouvelle stack LangGraph pure
-4. **Configurer** Google OAuth (Gmail + Drive)
-5. **Tester** et valider le workflow
-6. **Sauvegarder** la configuration finale (export Docker)
-7. **Déployer** sur un autre poste (import Docker)
-8. **Commandes utiles** et dépannage
-9. **Évolutions futures**
+![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
+![LangGraph](https://img.shields.io/badge/LangGraph-0.2%2B-orange)
+![Factur--X](https://img.shields.io/badge/Factur--X-EN16931-green)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)
+![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
 ---
 
-## Partie 1 — Comprendre l'architecture
+## Sommaire
 
-### Le workflow en une phrase
-
-Un email arrive dans Gmail avec un PDF → l'orchestrateur le détecte → il extrait le texte par OCR → filtre localement si ce n'est pas une facture → appelle Gemini pour structurer les données EN16931 → génère un PDF Factur-X (XML embarqué, PDF/A-3b) → l'uploade dans Google Drive dans le bon dossier mensuel → met un label sur l'email.
-
-### Architecture — 1 conteneur (LangGraph pur)
-
-```
-orchestrator    → graphe LangGraph : polling Gmail + pipeline complet (OCR, Gemini, XML, Drive)
-```
-
-RAM totale : ~200 Mo. Tout en Python. Pas d'appel HTTP interne. Debug facile avec des logs lisibles.
-
-**Avant (v3)** : 2 conteneurs — orchestrateur + micro-service Flask HTTP
-**Après (v4)** : 1 conteneur — graphe LangGraph avec 9 nœuds granulaires
-
-### Comment ça communique
-
-```
-Internet
-   │
-   ├── API Gmail      ◄──────── orchestrator (LangGraph)
-   ├── API Drive      ◄────────     9 nœuds Python
-   └── API Gemini     ◄────────     (OCR, IA, XML, PDF, Drive, Gmail)
-```
-
-Plus de réseau interne Docker, plus de port 5000, plus de dépendance HTTP entre services.
-
-### Le graphe LangGraph (9 nœuds)
-
-```
-extract_text            ← OCR du PDF (natif PyMuPDF ou Tesseract en fallback)
-    │
-    ▼
-filter_document         ← Filtrage keywords local (gratuit, avant tout appel IA)
-    │
-    ├── (non-facture ou OCR vide) ──────────────────────────────────► log_result → FIN
-    │
-    ▼
-call_gemini             ← Extraction structurée JSON (EN16931) via API Gemini
-    │
-    ├── (non-facture confirmé ou rate limit 429) ──────────────────► log_result → FIN
-    │
-    ▼
-normalize_data          ← Garantit la conformité EN16931 (adresses, lignes, totaux)
-    │
-    ▼
-generate_xml            ← Génère le XML CII D16B/D22B (format Factur-X)
-    │
-    ▼
-embed_facturx           ← Embarque l'XML dans le PDF → PDF/A-3b
-    │
-    ▼
-upload_drive            ← Crée le sous-dossier mensuel, uploade le PDF Factur-X
-    │
-    ▼
-label_gmail             ← Ajoute le label "Factures-Traitées" sur l'email
-    │
-    ▼
-log_result              ← Écrit dans SQLite + log console (toujours exécuté)
-```
-
-**Court-circuit économique** : `filter_document` rejette les non-factures évidentes SANS appeler Gemini (économie de quota). Gemini n'est appelé que sur les documents candidats.
-
-### Structure des fichiers de l'orchestrateur
-
-```
-orchestrator/
-├── main.py          ← Point d'entrée : boucle de polling Gmail (thin entry point)
-├── graph.py         ← Topologie du graphe (nœuds + arêtes — "le câblage")
-├── nodes.py         ← 9 nœuds LangGraph + 2 fonctions de routage
-├── facturx.py       ← Fonctions pures : OCR, Gemini, XML EN16931, PDF/A-3b
-├── services.py      ← GoogleServices (Gmail + Drive) + StateDB (SQLite)
-├── state.py         ← InvoiceState TypedDict (état partagé entre les nœuds)
-├── Dockerfile
-└── requirements.txt
-```
-
-### Profil Factur-X EN16931 — ce qui est généré
-
-Le profil EN16931 est conforme à la norme européenne EN 16931. Il contient :
-
-- **Lignes de facture** (obligatoire BR-16) : description, quantité, prix unitaire, TVA par ligne
-- **Adresse vendeur** complète avec code pays (BR-08, BR-09)
-- **Adresse acheteur** complète avec code pays (BR-10, BR-11)
-- **Ventilation TVA** par catégorie : base HT, montant TVA, taux, code (BG-23)
-- **Totaux complets** : somme lignes, HT, TVA, TTC, montant dû (BG-22)
-- **Moyens de paiement** : code, IBAN, BIC si disponibles (BG-16)
-- **Date d'échéance** si disponible
-
-Le nœud `normalize_data` complète automatiquement les données manquantes (ligne de fallback, adresses par défaut, recalcul des totaux).
+1. [Présentation du projet](#1-présentation-du-projet)
+2. [Architecture technique](#2-architecture-technique)
+3. [LangGraph — Concepts clés et pédagogie](#3-langgraph--concepts-clés-et-pédagogie)
+4. [Les 9 nœuds du workflow](#4-les-9-nœuds-du-workflow)
+5. [Installation locale depuis le repo](#5-installation-locale-depuis-le-repo)
+6. [Configuration Google OAuth2 (credentials)](#6-configuration-google-oauth2-credentials)
+7. [Lancement et vérification](#7-lancement-et-vérification)
+8. [Déploiement sur un nouveau poste](#8-déploiement-sur-un-nouveau-poste)
+9. [Commandes utiles et dépannage](#9-commandes-utiles-et-dépannage)
+10. [CI/CD et tests](#10-cicd-et-tests)
+11. [Évolutions futures](#11-évolutions-futures)
 
 ---
 
-## Partie 2 — Nettoyage de l'ancienne stack
+## 1. Présentation du projet
 
-*Sauter cette partie si tu pars d'un poste vierge ou si tu migres depuis la v4.*
+### Problème résolu
 
-### Si tu migres depuis la v3 (2 conteneurs)
+Les factures fournisseurs arrivent en PDF par email. Les traiter manuellement (vérifier, classer, extraire les données, créer les entrées comptables) est répétitif et source d'erreurs.
 
-```powershell
-cd C:\Automatisch
-docker compose down
-docker rmi automatisch-facturx-service automatisch-orchestrator
-```
+### Solution
 
-Si des commandes disent "No such container/image", c'est normal.
+Un agent autonome surveille une boîte Gmail, détecte les PDFs de factures, les analyse par IA et génère des fichiers **Factur-X EN16931** — le format européen de facture électronique structurée (PDF + XML embarqué). Les fichiers sont archivés dans Google Drive dans des sous-dossiers mensuels.
 
-### Si tu pars d'Automatisch (stack legacy)
+### Ce que le projet démontre
 
-```powershell
-docker rm -f automatisch-main automatisch-worker automatisch-db automatisch-redis facturx-service
-docker volume rm automatisch_automatisch-db-data
-docker network rm automatisch_automatisch-net
-docker rmi automatischio/automatisch:latest postgres:16-alpine redis:7-alpine
-```
-
-### Vérification
-
-```powershell
-docker ps -a          # Doit être vide
-docker volume ls      # Pas de volume automatisch
-```
+| Compétence | Implémentation |
+|---|---|
+| **LangGraph** | Workflow orienté graphe, 9 nœuds, routage conditionnel |
+| **Gemini API** | Extraction structurée JSON depuis PDF OCR |
+| **Google APIs** | Gmail OAuth2, Drive v3, gestion des tokens |
+| **Standard Factur-X** | XML CII D16B, profil EN16931, PDF/A-3b |
+| **Python avancé** | TypedDict, SQLite WAL, backoff exponentiel, injection de dépendances |
+| **Docker** | Conteneur autonome, volumes persistants, restart policy |
 
 ---
 
-## Partie 3 — Installation de la nouvelle stack
+## 2. Architecture technique
+
+### Vue d'ensemble
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Docker Container  ·  orchestrator                              │
+│                                                                 │
+│  main.py ──► boucle polling Gmail (toutes les 15 min)          │
+│     │                                                           │
+│     └──► Pour chaque PDF détecté :                             │
+│             workflow.invoke(état_initial)                       │
+│                  │                                              │
+│                  ▼  LangGraph exécute les 9 nœuds              │
+│       ┌──────────────────────────────────┐                      │
+│       │  extract_text → filter_document  │                      │
+│       │  → call_gemini → normalize_data  │                      │
+│       │  → generate_xml → embed_facturx  │                      │
+│       │  → upload_drive → label_gmail    │                      │
+│       │  → log_result                    │                      │
+│       └──────────────────────────────────┘                      │
+│                                                                 │
+│  Volumes persistants :                                          │
+│    orchestrator/credentials.json  ← OAuth credentials (lecture) │
+│    orchestrator/token.json        ← Token OAuth2 (lecture/écriture) │
+│    orchestrator_data/state.db     ← SQLite anti-retraitement    │
+└─────────────────────────────────────────────────────────────────┘
+          │                    │                    │
+          ▼                    ▼                    ▼
+    Gmail API            Gemini API           Drive API
+   (OAuth2)            (REST Gemini)          (OAuth2)
+```
+
+### Refactoring de l'architecture
+
+Ce projet est passé de **2 conteneurs** (orchestrateur + micro-service Flask HTTP) à **1 conteneur autonome** :
+
+| | Avant | Après |
+|---|---|---|
+| Conteneurs | 2 (orchestrator + facturx-service) | 1 (orchestrator) |
+| Communication | HTTP interne (appels REST) | Appels Python directs |
+| Nœuds LangGraph | 4 nœuds | 9 nœuds |
+| Logique métier | Dispersée dans 2 services | Centralisée dans `facturx_utils.py` |
+| Complexité opérationnelle | Plus élevée (2 builds, 2 logs) | Simple (1 build, 1 log) |
 
 ### Structure des fichiers
 
 ```
-C:\Automatisch\
-├── docker-compose.yml              ← 1 service (orchestrator uniquement)
-├── .env                             ← Variables d'environnement
-├── orchestrator\
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── main.py                      ← Point d'entrée (polling Gmail)
-│   ├── graph.py                     ← Topologie du graphe LangGraph
-│   ├── nodes.py                     ← 9 nœuds + 2 routeurs
-│   ├── facturx.py                   ← Pipeline OCR + Gemini + XML + PDF
-│   ├── services.py                  ← Google OAuth2 + SQLite
-│   ├── state.py                     ← État partagé (TypedDict)
-│   ├── credentials.json             ← Identifiants OAuth Google
-│   └── token.json                   ← Token d'accès (créé automatiquement)
-└── orchestrator_data\
-    └── state.db                     ← Base SQLite anti-retraitement
+Factur-X-project/
+├── docker-compose.yml              ← 1 service, toutes les variables d'env
+├── .env                             ← Secrets locaux (gitignored)
+│
+├── orchestrator/
+│   ├── Dockerfile                  ← Image Python 3.12-slim
+│   ├── requirements.txt            ← LangGraph, Google APIs, Gemini, etc.
+│   │
+│   ├── main.py                     ← Point d'entrée : boucle polling Gmail
+│   ├── graph.py                    ← Topologie du graphe (nœuds + arêtes)
+│   ├── nodes.py                    ← Les 9 nœuds + 2 routeurs
+│   ├── state.py                    ← TypedDict InvoiceState (état partagé)
+│   ├── services.py                 ← GoogleServices + StateDB (SQLite)
+│   └── facturx_utils.py            ← Fonctions métier pures (OCR, XML, PDF)
+│
+├── orchestrator_data/
+│   └── state.db                    ← SQLite anti-retraitement (gitignored)
+│
+├── tests/
+│   ├── test_facturx_en16931.py     ← Tests de conformité XML EN16931
+│   └── test_gmail_integration_invoice.py
+│
+└── tools/
+    └── ci_validate_facturx.py      ← Validation CI GitHub Actions
 ```
-
-### Contenu du .env
-
-```ini
-# --- IA Gemini ---
-GEMINI_API_KEY=ta_clé_gemini_ici
-GEMINI_MODEL=gemini-2.5-flash
-FACTURX_PROFILE=en16931
-
-# --- Orchestrateur LangGraph ---
-DRIVE_FOLDER_ID=identifiant_du_dossier_drive_uniquement_id
-POLL_INTERVAL=900
-GMAIL_LABEL=Factures-Traitées
-GMAIL_QUERY=has:attachment filename:pdf -label:Factures-Traitées newer_than:7d
-
-# --- Throttling Gemini (tier gratuit) ---
-MAX_EMAILS_PER_CYCLE=3
-MIN_SECONDS_BETWEEN_CALLS=15
-MAX_GEMINI_REQUESTS_PER_DAY=18
-```
-
-### Points d'attention critiques
-
-- **`GEMINI_API_KEY`** : clé gratuite depuis https://aistudio.google.com/apikey
-- **`FACTURX_PROFILE`** : doit être `en16931` (pas `minimum` ni `EN16931` en majuscule)
-- **`DRIVE_FOLDER_ID`** : uniquement l'ID, PAS l'URL. Si l'URL est `https://drive.google.com/drive/folders/1cPFMtFhN-VOnPJnoZFWcWbbsickLHiGc?usp=drive_link`, l'ID est `1cPFMtFhN-VOnPJnoZFWcWbbsickLHiGc` (sans le `?usp=drive_link`)
-- **`credentials.json`** : doit être un FICHIER (mode `-a----`), pas un dossier (mode `d-----`). Vérifier avec `dir C:\Automatisch\orchestrator\`
-- **Pas de `FACTURX_SERVICE_URL`** : cette variable est supprimée — il n'y a plus de microservice HTTP
 
 ---
 
-## Partie 4 — Configuration Google OAuth
+## 3. LangGraph — Concepts clés et pédagogie
 
-*Opération unique. Ne se fait qu'une seule fois par poste.*
+### Qu'est-ce que LangGraph ?
 
-### 4.1 — Créer un projet Google Cloud
+LangGraph est un framework Python de **LangChain** pour construire des agents et workflows complexes sous forme de **graphes orientés**. Contrairement à une suite d'appels de fonctions séquentiels, LangGraph modélise explicitement :
 
-1. Va sur https://console.cloud.google.com/
-2. Sélecteur de projet en haut → "Nouveau projet"
+- **Les nœuds** : unités de traitement (fonctions Python pures)
+- **Les arêtes** : les chemins possibles entre nœuds
+- **L'état** : une mémoire partagée passée entre tous les nœuds
+
+### Concept 1 — L'État (State)
+
+L'état est un `TypedDict` Python qui joue le rôle de **mémoire partagée** entre tous les nœuds. C'est la seule façon pour les nœuds de se transmettre des données.
+
+```python
+# state.py
+class InvoiceState(TypedDict):
+    # Données d'entrée (injectées avant invoke)
+    message_id: str
+    pdf_bytes: bytes
+    pdf_filename: str
+
+    # Enrichi au fil des nœuds
+    ocr_text: str           # → par extract_text
+    invoice_data: dict      # → par call_gemini (puis normalize_data)
+    xml_bytes: bytes        # → par generate_xml
+    facturx_pdf: bytes      # → par embed_facturx
+    drive_file_url: str     # → par upload_drive
+
+    # Gestion des erreurs
+    processing_error: str   # Toute valeur non-vide = erreur upstream
+```
+
+**Règle fondamentale :**
+```
+nœud(état_complet) → dict_partiel
+état_suivant = {**état_actuel, **dict_partiel}
+```
+
+Chaque nœud ne retourne que les champs qu'il modifie. LangGraph fusionne automatiquement.
+
+### Concept 2 — Les Nœuds (Nodes)
+
+Un nœud est une **fonction Python ordinaire** :
+
+```python
+def node_extract_text(state: InvoiceState) -> dict:
+    # 1. Lire ce dont on a besoin
+    pdf_bytes = state["pdf_bytes"]
+
+    # 2. Faire le travail
+    ocr_text = extract_text_from_pdf(pdf_bytes)
+
+    # 3. Retourner UNIQUEMENT les champs modifiés
+    return {"ocr_text": ocr_text}
+```
+
+**Pattern — Guard Clause :** la plupart des nœuds commencent par vérifier `processing_error`. Si une erreur upstream est détectée, le nœud ne fait rien et retourne `{}`. Cela permet d'avoir des arêtes directes simples même en cas d'erreur :
+
+```python
+def node_generate_xml(state: InvoiceState) -> dict:
+    if state.get("processing_error"):
+        return {}  # Erreur upstream → on court-circuite
+    # ... traitement normal
+```
+
+### Concept 3 — Le Graphe et les Arêtes
+
+```python
+# graph.py
+graph = StateGraph(InvoiceState)
+
+# Enregistrer les nœuds
+graph.add_node("extract_text", node_extract_text)
+graph.add_node("filter_document", node_filter_document)
+graph.add_node("call_gemini", node_call_gemini)
+# ...
+
+# Arête de départ
+graph.set_entry_point("extract_text")
+
+# Arêtes directes (chemin normal)
+graph.add_edge("extract_text", "filter_document")
+
+# Arête conditionnelle (branchement dynamique)
+graph.add_conditional_edges(
+    "filter_document",
+    route_after_filter,          # Fonction routeur
+    {
+        "call_gemini": "call_gemini",    # Si candidat facture
+        "log_result":  "log_result",     # Si rejeté (économise le quota Gemini)
+    }
+)
+
+workflow = graph.compile()
+```
+
+### Concept 4 — Les Routeurs (Edge Functions)
+
+Un routeur est une fonction qui reçoit l'état et retourne le **nom du nœud suivant** :
+
+```python
+def route_after_filter(state: InvoiceState) -> str:
+    if state.get("processing_error"):
+        return "log_result"   # Court-circuit → log direct
+    return "call_gemini"      # Chemin normal → appel Gemini
+```
+
+### Concept 5 — Injection et Invocation
+
+```python
+# main.py — Pour chaque PDF trouvé dans Gmail
+initial_state: InvoiceState = {
+    "message_id": msg_id,
+    "pdf_bytes": pdf_data,
+    "pdf_filename": "facture.pdf",
+    "subject": "...",
+    "sender": "...",
+    # ... autres champs initiaux
+    "processing_error": "",   # Pas d'erreur au départ
+    "services": google_services,  # Injection de dépendances
+    "state_db": sqlite_db,
+}
+
+# LangGraph exécute les 9 nœuds dans l'ordre défini
+workflow.invoke(initial_state)
+```
+
+### Pourquoi LangGraph plutôt qu'une liste de fonctions ?
+
+| Critère | Liste de fonctions | LangGraph |
+|---|---|---|
+| Branchement conditionnel | `if/else` mélangé dans la logique | Routeurs explicites dans le graphe |
+| Visualisation | Aucune | DAG visualisable |
+| Testabilité | Difficile (effets de bord) | Chaque nœud testable isolément |
+| Checkpointing | À implémenter manuellement | Intégré (sauvegarde/reprise d'état) |
+| Parallélisme | Manuel | Nœuds indépendants en `//` natif |
+| Extensibilité | Modifier le code existant | Ajouter un nœud + une arête |
+
+---
+
+## 4. Les 9 nœuds du workflow
+
+```
+                     ┌──────────────┐
+                     │ extract_text │  OCR : PyMuPDF natif ou Tesseract fallback
+                     └──────┬───────┘
+                            │
+                     ┌──────▼──────────┐
+                     │ filter_document │  Mots-clés facture : GRATUIT, sans Gemini
+                     └──────┬──────────┘
+             ┌──────────────┤
+   [rejeté / erreur]   [candidat facture]
+             ↓              ↓
+        log_result   ┌─────▼──────────┐
+           (END)     │  call_gemini   │  IA : extraction JSON structuré (quota)
+                     └──────┬─────────┘
+             ┌──────────────┤
+   [pas facture / 429]  [est une facture]
+             ↓              ↓
+        log_result   ┌──────▼──────────┐
+           (END)     │ normalize_data  │  Garantit conformité EN16931 (fallbacks)
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
+                     │  generate_xml   │  XML CII D16B/D22B (standard Factur-X)
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
+                     │  embed_facturx  │  PDF/A-3b + XML embarqué
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
+                     │  upload_drive   │  Sous-dossier mensuel "2026-02 Février"
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
+                     │   label_gmail   │  Label "Factures-Traitées" sur l'email
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
+                     │   log_result    │  SQLite + logs — TOUJOURS exécuté
+                     └──────┬──────────┘
+                            │
+                           END
+```
+
+| # | Nœud | Rôle | Coût |
+|---|---|---|---|
+| 1 | `extract_text` | OCR du PDF (PyMuPDF natif, Tesseract en fallback) | Gratuit |
+| 2 | `filter_document` | Filtrage par mots-clés facture avant appel IA | Gratuit |
+| 3 | `call_gemini` | Extraction JSON structuré via Gemini Flash | Quota API |
+| 4 | `normalize_data` | Normalisation + fallbacks pour conformité EN16931 | Gratuit |
+| 5 | `generate_xml` | Génération XML CII D16B/D22B | Gratuit |
+| 6 | `embed_facturx` | Assemblage PDF/A-3b avec XML embarqué | Gratuit |
+| 7 | `upload_drive` | Upload dans sous-dossier Drive mensuel | Gratuit |
+| 8 | `label_gmail` | Application du label sur l'email source | Gratuit |
+| 9 | `log_result` | Écriture SQLite + logs structurés | Gratuit |
+
+### Anti-retraitement SQLite
+
+La base SQLite (`orchestrator_data/state.db`) enregistre chaque couple `(message_id, filename)` traité. À chaque cycle de polling, les PDFs déjà vus sont sautés **avant** tout appel IA — économisant le quota Gemini.
+
+```
+Statuts SQLite :
+  success              → traitement complet réussi
+  not_invoice          → rejeté avant Gemini (filtre mots-clés)
+  not_invoice_gemini   → rejeté par Gemini après analyse
+  error                → erreur technique (Drive, Gmail...)
+  (pas de ligne)       → rate_limit_429 → sera retenté au prochain cycle
+```
+
+---
+
+## 5. Installation locale depuis le repo
+
+### Prérequis
+
+- **Git**
+- **Docker Desktop** (Windows/Mac) ou **Docker Engine** (Linux)
+- **Python 3.10+** (uniquement pour générer le token OAuth, pas pour faire tourner le projet)
+
+### Étape 1 — Cloner le repo
+
+```bash
+git clone https://github.com/tonygloaguen/Factur-X-project.git
+cd Factur-X-project
+```
+
+> `credentials.json` et `token.json` sont dans `.gitignore`. Ils ne sont jamais versionnés.
+> Vous devrez les créer manuellement (voir section 6).
+
+### Étape 2 — Créer le fichier `.env`
+
+Créez un fichier `.env` à la racine du projet (au même niveau que `docker-compose.yml`) :
+
+```ini
+# ── IA Gemini ────────────────────────────────────────────────────
+# Clé API gratuite : https://aistudio.google.com/apikey
+GEMINI_API_KEY=votre_cle_gemini_ici
+
+# Modèle Gemini (gemini-2.5-flash recommandé — rapide et bon marché)
+GEMINI_MODEL=gemini-2.5-flash
+
+# Profil Factur-X — DOIT être exactement "en16931" (minuscules)
+FACTURX_PROFILE=en16931
+
+# ── Google Drive ─────────────────────────────────────────────────
+# ID du dossier Drive racine (PAS l'URL entière, uniquement l'ID)
+# Exemple d'URL : https://drive.google.com/drive/folders/1cPFMtFhN-VOnPJ...
+# → DRIVE_FOLDER_ID=1cPFMtFhN-VOnPJ...   (sans le ?usp=drive_link)
+DRIVE_FOLDER_ID=identifiant_dossier_drive
+
+# ── Gmail polling ─────────────────────────────────────────────────
+# Intervalle de polling en secondes (900 = 15 minutes)
+POLL_INTERVAL=900
+
+# Label appliqué aux emails une fois traités
+GMAIL_LABEL=Factures-Traitées
+
+# Requête Gmail (syntaxe Google Search)
+GMAIL_QUERY=has:attachment filename:pdf -label:Factures-Traitées newer_than:7d
+```
+
+> **Points critiques :**
+> - `FACTURX_PROFILE` : doit être `en16931` en minuscules exactement
+> - `DRIVE_FOLDER_ID` : uniquement l'ID (la partie après `/folders/`), jamais l'URL complète
+> - Ne commitez jamais ce fichier (il est dans `.gitignore`)
+
+### Étape 3 — Créer le répertoire de données
+
+```bash
+# Linux / Mac
+mkdir -p orchestrator_data
+
+# Windows (PowerShell)
+New-Item -ItemType Directory -Force -Path orchestrator_data
+```
+
+Ce répertoire contiendra la base SQLite montée en volume dans le conteneur.
+
+---
+
+## 6. Configuration Google OAuth2 (credentials)
+
+> **Opération unique par compte Google.** Le token généré se renouvelle automatiquement.
+
+### 6.1 — Créer un projet Google Cloud
+
+1. Allez sur [https://console.cloud.google.com/](https://console.cloud.google.com/)
+2. Sélecteur de projet (en haut) → **Nouveau projet**
 3. Nom : `Factures-Automatisation` → Créer
 
-### 4.2 — Activer les APIs
+### 6.2 — Activer les APIs
 
-1. Menu hamburger (☰) → "API et services" → "Bibliothèque"
-2. Cherche **Gmail API** → Activer
-3. Cherche **Google Drive API** → Activer
+1. Menu (☰) → **API et services** → **Bibliothèque**
+2. Rechercher **Gmail API** → Activer
+3. Rechercher **Google Drive API** → Activer
 
-### 4.3 — Configurer l'écran de consentement OAuth
+### 6.3 — Configurer l'écran de consentement OAuth
 
-Dans **Google Auth Platform** :
+Dans **Google Auth Platform** (anciennement "Écran de consentement OAuth") :
 
-1. **Branding** : Nom = `Factures-Auto`, email d'assistance = ton email
-2. **Audience** : Type = Externe, ajoute ton email en utilisateur test
-3. **Accès aux données** : ajoute les scopes `gmail.modify` et `drive.file`
+1. **Branding** : Nom de l'app = `Factures-Auto`, email d'assistance = votre email
+2. **Audience** : Type = **Externe**, ajoutez votre email en **utilisateur test**
+3. **Accès aux données** (Scopes) : ajoutez ces deux scopes :
+   - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/drive.file`
 
-### 4.4 — Créer les identifiants
+### 6.4 — Créer les identifiants OAuth
 
-1. Google Auth Platform → **Clients**
-2. **"+ Créer un client"**
-3. Type : **Application de bureau** → Nom : `orchestrator-factures`
-4. Créer → **Télécharge le JSON** → renomme-le `credentials.json`
-5. Place-le dans `C:\Automatisch\orchestrator\credentials.json`
+1. **Google Auth Platform** → **Clients** → **+ Créer un client**
+2. Type d'application : **Application de bureau**
+3. Nom : `orchestrator-factures` → Créer
+4. Téléchargez le fichier JSON → Renommez-le `credentials.json`
+5. Placez-le dans `orchestrator/credentials.json`
 
-### 4.5 — Première autorisation (depuis Windows, pas Docker)
+```
+Factur-X-project/
+└── orchestrator/
+    └── credentials.json   ← ici (jamais committé, dans .gitignore)
+```
 
+### 6.5 — Générer le token OAuth (première connexion)
+
+Cette étape nécessite Python en local et ouvre un navigateur pour l'autorisation Google.
+
+**Sur Windows (PowerShell) :**
 ```powershell
 pip install google-api-python-client google-auth-oauthlib
 
-cd C:\Automatisch\orchestrator
+cd C:\...\Factur-X-project\orchestrator
+
 python -c "
 from google_auth_oauthlib.flow import InstalledAppFlow
 flow = InstalledAppFlow.from_client_secrets_file(
     'credentials.json',
-    ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/drive.file']
+    ['https://www.googleapis.com/auth/gmail.modify',
+     'https://www.googleapis.com/auth/drive.file']
 )
 creds = flow.run_local_server(port=8090, open_browser=True)
 with open('token.json', 'w') as f:
     f.write(creds.to_json())
-print('Token sauvegardé !')
+print('Token sauvegarde dans token.json !')
 "
 ```
 
-Le navigateur s'ouvre → se connecter → autoriser → `token.json` est créé.
+**Sur Linux/Mac :**
+```bash
+pip install google-api-python-client google-auth-oauthlib
 
-### 4.6 — Trouver l'ID du dossier Drive
+cd /chemin/vers/Factur-X-project/orchestrator
 
-Ouvre le dossier dans Drive → regarde l'URL → copie la partie après `/folders/` et avant le `?`.
+python3 -c "
+from google_auth_oauthlib.flow import InstalledAppFlow
+flow = InstalledAppFlow.from_client_secrets_file(
+    'credentials.json',
+    ['https://www.googleapis.com/auth/gmail.modify',
+     'https://www.googleapis.com/auth/drive.file']
+)
+creds = flow.run_local_server(port=8090, open_browser=True)
+with open('token.json', 'w') as f:
+    f.write(creds.to_json())
+print('Token sauvegarde dans token.json !')
+"
+```
+
+Le navigateur s'ouvre → Connectez-vous → Autorisez l'accès → `token.json` est créé.
+
+### 6.6 — Vérification de la structure avant lancement
+
+```
+Factur-X-project/
+├── .env                    ← créé à l'étape 5.2
+├── docker-compose.yml
+├── orchestrator_data/      ← créé à l'étape 5.3
+└── orchestrator/
+    ├── credentials.json    ← téléchargé à l'étape 6.4
+    ├── token.json          ← généré à l'étape 6.5
+    ├── Dockerfile
+    ├── requirements.txt
+    ├── main.py
+    ├── graph.py
+    ├── nodes.py
+    ├── state.py
+    ├── services.py
+    └── facturx_utils.py
+```
+
+> **Piège fréquent sur Windows :** vérifiez que `credentials.json` est un **fichier** et non un **dossier** :
+> ```powershell
+> dir orchestrator\credentials.json
+> # Attendu : -a----   (fichier)
+> # Erreur  : d-----   (dossier — double-clic au lieu de téléchargement)
+> ```
 
 ---
 
-## Partie 5 — Lancement et test
+## 7. Lancement et vérification
 
-### 5.1 — Premier lancement
+### Premier démarrage
 
-```powershell
-cd C:\Automatisch
+```bash
+cd Factur-X-project
 docker compose up -d --build
 ```
 
-Le build peut prendre 2-3 minutes (téléchargement Tesseract OCR + dépendances Python).
+Le build prend 2-3 minutes (téléchargement des dépendances Python).
 
-### 5.2 — Vérifier l'état
+### Vérifier l'état
 
-```powershell
+```bash
 docker compose ps
 ```
 
 Résultat attendu :
-
 ```
 NAME           STATUS    PORTS
 orchestrator   Up
 ```
 
-Un seul conteneur, pas de port exposé (plus de micro-service HTTP).
+### Vérifier les logs au démarrage
 
-### 5.3 — Vérifier les logs au démarrage
-
-```powershell
-docker compose logs orchestrator
-```
-
-Tu dois voir :
-
-```
-Orchestrateur LangGraph Factur-X — Pure Python
-Architecture : 1 graphe LangGraph, 9 nœuds, 0 microservice HTTP
-Graphe LangGraph compilé : 9 nœuds, 2 arêtes conditionnelles
-Démarrage de la boucle de polling...
-```
-
-### 5.4 — Suivre les logs en temps réel
-
-```powershell
+```bash
 docker compose logs -f orchestrator
 ```
 
-### 5.5 — Test avec une vraie facture
-
-1. Envoie-toi un email avec une facture PDF en pièce jointe
-2. Force un scan : `docker compose restart orchestrator`
-3. Vérifie les logs → tu dois voir les 9 nœuds s'enchaîner avec `[ 1/9 ]`, `[ 2/9 ]`...
-4. Vérifie Google Drive → le PDF Factur-X dans le bon sous-dossier mensuel
-5. Vérifie Gmail → l'email a le label "Factures-Traitées"
-
-### 5.6 — Lire les logs du workflow
-
-Chaque PDF traité génère une séquence lisible :
-
+Logs normaux attendus :
 ```
-[ 1/9 ] extract_text : facture-edf.pdf (245 Ko)
-[ 2/9 ] filter_document : score:6 → candidat facture
-[ 3/9 ] call_gemini : extraction EN16931...
-[ 4/9 ] normalize_data : 2 ligne(s), HT=150.00€, TVA=30.00€, TTC=180.00€
-[ 5/9 ] generate_xml : 4821 octets
-[ 6/9 ] embed_facturx : EDF_FacturX_2026-01-15_INV-2026-001.pdf → '2026-01 Janvier'
-[ 7/9 ] upload_drive : upload OK
-[ 8/9 ] label_gmail : label 'Factures-Traitées' appliqué
-[ 9/9 ] log_result : ✅ Succès : EDF | INV-2026-001 | 180.0€ TTC
+2026-02-26 10:00:00 [INFO] ============================================================
+2026-02-26 10:00:00 [INFO] Orchestrateur LangGraph — Factures fournisseurs
+2026-02-26 10:00:00 [INFO] ============================================================
+2026-02-26 10:00:01 [INFO] StateDB ouverte : /app/data/state.db
+2026-02-26 10:00:02 [INFO] Connexion Google OK
+2026-02-26 10:00:02 [INFO] Graphe LangGraph compilé (9 nœuds)
+2026-02-26 10:00:02 [INFO] Démarrage de la boucle de polling...
+2026-02-26 10:00:03 [INFO] Aucun nouvel email avec facture détecté
+2026-02-26 10:00:03 [INFO] Prochaine vérification dans 900 secondes...
 ```
 
-### 5.7 — Comportement normal
+### Tester avec une facture réelle
 
-- **PDF non-factures** (CV, billets, notifications) → rejetés par `filter_document` SANS appeler Gemini (économie de quota)
-- **Factures PDF** → traitement complet 9 nœuds avec données EN16931 structurées
-- **Rate limit Gemini (429)** → retry automatique avec backoff exponentiel, puis skip (retenté au prochain cycle)
-- **Emails rejetés** : `newer_than:7d` dans la requête Gmail limite le bruit
+1. Envoyez-vous un email avec une facture PDF en pièce jointe
+2. Forcez un scan immédiat : `docker compose restart orchestrator`
+3. Suivez les logs : `docker compose logs -f orchestrator`
+
+Logs de traitement attendus :
+```
+[INFO] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[INFO] Nouvel email : 'Facture EDF Février 2026' de noreply@edf.fr
+[INFO] [ 1/9 ] extract_text : facture_edf.pdf (142 Ko)
+[INFO] [ 2/9 ] filter_document : candidat facture (score 8/10)
+[INFO] [ 3/9 ] call_gemini : appel API...
+[INFO] [ 4/9 ] normalize_data : 3 lignes, TVA 20%, TTC 245.60€
+[INFO] [ 5/9 ] generate_xml : XML EN16931 généré (4821 bytes)
+[INFO] [ 6/9 ] embed_facturx : PDF/A-3b créé (187 Ko)
+[INFO] [ 7/9 ] upload_drive : → 2026-02 Février/
+[INFO] [ 8/9 ] label_gmail : label 'Factures-Traitées' appliqué
+[INFO] ✅ Succès : EDF | INV-2026-02-001 | 245.60 € TTC → https://drive.google.com/...
+```
 
 ---
 
-## Partie 6 — Sauvegarder la configuration finale (export Docker)
+## 8. Déploiement sur un nouveau poste
 
-Une fois que tout fonctionne, sauvegarder l'ensemble pour redéployer sur un autre poste.
+### Prérequis sur le poste cible
 
-### 6.1 — Méthode 1 : Copie du dossier source (RECOMMANDÉ)
+| Logiciel | Obligatoire | Usage |
+|---|---|---|
+| Git | Oui | Cloner le repo |
+| Docker Desktop (Windows/Mac) ou Docker Engine (Linux) | Oui | Faire tourner le conteneur |
+| Python 3.10+ | Oui (une fois) | Générer le token OAuth |
+| Connexion Internet permanente | Oui | Gmail, Drive, Gemini APIs |
 
-**Sur le poste source :**
+### Option A — Via GitHub (recommandé)
 
-```powershell
-# 1. Vérifier que tout fonctionne
-cd C:\Automatisch
-docker compose ps
+```bash
+# 1. Cloner le repo
+git clone https://github.com/tonygloaguen/Factur-X-project.git
+cd Factur-X-project
 
-# 2. Créer une archive ZIP du dossier complet
-Compress-Archive -Path C:\Automatisch\* -DestinationPath C:\Automatisch-backup.zip -Force
-```
+# 2. Créer le .env (voir section 5.2)
+# 3. Placer credentials.json dans orchestrator/ (voir section 6.4)
+# 4. Générer token.json (voir section 6.5)
 
-**Fichiers inclus dans l'archive :**
+# 5. Créer le répertoire de données
+mkdir -p orchestrator_data       # Linux/Mac
+# New-Item -ItemType Directory -Force -Path orchestrator_data   # Windows
 
-| Fichier | Inclus ? | Note |
-|---------|----------|------|
-| `docker-compose.yml` | ✅ | 1 service uniquement |
-| `.env` | ✅ | Clés API et configuration |
-| `orchestrator\main.py` | ✅ | Point d'entrée |
-| `orchestrator\graph.py` | ✅ | Topologie LangGraph |
-| `orchestrator\nodes.py` | ✅ | 9 nœuds + routeurs |
-| `orchestrator\facturx.py` | ✅ | Pipeline métier complet |
-| `orchestrator\services.py` | ✅ | Google + SQLite |
-| `orchestrator\state.py` | ✅ | TypedDict état partagé |
-| `orchestrator\Dockerfile` | ✅ | Image Docker |
-| `orchestrator\requirements.txt` | ✅ | Dépendances Python |
-| `orchestrator\credentials.json` | ✅ | Identifiants OAuth |
-| `orchestrator\token.json` | ⚠️ | Inclus mais devra être recréé sur le nouveau poste |
-| `orchestrator_data\state.db` | ✅ | Historique des emails traités |
-
-### 6.2 — Méthode 2 : Export de l'image Docker (OPTIONNEL)
-
-Si le poste cible n'a pas accès à Internet ou pour éviter le temps de build :
-
-**Sur le poste source :**
-
-```powershell
-# 1. Lister les images
-docker images
-
-# 2. Sauvegarder l'image dans un fichier tar
-docker save automatisch-orchestrator -o C:\Automatisch-image.tar
-
-# 3. Le fichier fait environ 500 Mo - 1 Go
-dir C:\Automatisch-image.tar
-```
-
-**Copier sur le poste cible :**
-
-Copie les deux fichiers sur une clé USB ou un partage réseau :
-- `C:\Automatisch-backup.zip` (~100 Ko, le code source)
-- `C:\Automatisch-image.tar` (~500 Mo - 1 Go, l'image Docker pré-construite)
-
----
-
-## Partie 7 — Déployer sur un autre poste (import Docker)
-
-### 7.1 — Prérequis sur le poste cible
-
-- **Windows 10/11 Pro ou Entreprise** (nécessaire pour Hyper-V / WSL 2)
-- **Docker Desktop for Windows** (gratuit pour entreprises < 250 employés)
-- **Python** installé (uniquement pour la première autorisation OAuth)
-- **Connexion Internet** permanente (pour Gmail, Drive, API Gemini)
-
-### 7.2 — Installation Docker Desktop
-
-1. Télécharger depuis https://www.docker.com/products/docker-desktop/
-2. Installer, accepter l'activation de WSL 2
-3. Redémarrer le PC si demandé
-4. Lancer Docker Desktop une première fois
-5. **Settings → General → cocher "Start Docker Desktop when you sign in to your computer"**
-
-### 7.3 — Déploiement avec les sources (Méthode 1)
-
-```powershell
-# 1. Extraire l'archive
-Expand-Archive -Path C:\Automatisch-backup.zip -DestinationPath C:\Automatisch -Force
-
-# 2. Supprimer l'ancien token (il faudra le recréer)
-del C:\Automatisch\orchestrator\token.json
-
-# 3. Refaire l'autorisation OAuth
-pip install google-api-python-client google-auth-oauthlib
-cd C:\Automatisch\orchestrator
-python -c "
-from google_auth_oauthlib.flow import InstalledAppFlow
-flow = InstalledAppFlow.from_client_secrets_file(
-    'credentials.json',
-    ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/drive.file']
-)
-creds = flow.run_local_server(port=8090, open_browser=True)
-with open('token.json', 'w') as f:
-    f.write(creds.to_json())
-print('Token sauvegardé !')
-"
-
-# 4. Construire l'image et lancer
-cd C:\Automatisch
+# 6. Lancer
 docker compose up -d --build
-
-# 5. Vérifier
-docker compose ps
-docker compose logs orchestrator
 ```
 
-### 7.4 — Déploiement avec l'image pré-construite (Méthode 2)
+### Option B — Via archive ZIP (poste sans accès GitHub)
 
+**Sur le poste source :**
 ```powershell
-# 1. Extraire l'archive source
-Expand-Archive -Path C:\Automatisch-backup.zip -DestinationPath C:\Automatisch -Force
-
-# 2. Charger l'image Docker sauvegardée
-docker load -i C:\Automatisch-image.tar
-
-# 3. Supprimer l'ancien token et refaire l'OAuth
-del C:\Automatisch\orchestrator\token.json
-pip install google-api-python-client google-auth-oauthlib
-cd C:\Automatisch\orchestrator
-python -c "
-from google_auth_oauthlib.flow import InstalledAppFlow
-flow = InstalledAppFlow.from_client_secrets_file(
-    'credentials.json',
-    ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/drive.file']
-)
-creds = flow.run_local_server(port=8090, open_browser=True)
-with open('token.json', 'w') as f:
-    f.write(creds.to_json())
-print('Token sauvegardé !')
-"
-
-# 4. Lancer (sans --build car l'image est déjà chargée)
-cd C:\Automatisch
-docker compose up -d
-
-# 5. Vérifier
-docker compose ps
-docker compose logs orchestrator
+# Windows PowerShell
+Compress-Archive -Path C:\...\Factur-X-project\* -DestinationPath C:\Factur-X-backup.zip -Force
 ```
 
-### 7.5 — Redémarrage automatique
-
-**La solution redémarre toute seule quand le PC s'allume**, grâce à deux mécanismes :
-
-| Mécanisme | Rôle | Vérifier |
-|-----------|------|----------|
-| **Docker Desktop "Start on login"** | Lance Docker au boot Windows | Settings → General → ✅ |
-| **`restart: unless-stopped`** | Relance les conteneurs au démarrage de Docker | Déjà dans docker-compose.yml ✅ |
-
-**Scénario quotidien :**
-
-1. Tu éteins le PC → le conteneur s'arrête
-2. Tu rallumes → Windows → Docker Desktop → conteneur redémarre → polling Gmail reprend
-3. Rien à faire, c'est transparent
-
-**Exception** : `docker compose down` SUPPRIME les conteneurs → pas de restart au boot. Réserver uniquement pour la maintenance.
-
-### 7.6 — Sécurité de la configuration
-
-| Fichier | Risque | Protection |
-|---------|--------|------------|
-| `.env` | Clé API Gemini | Quota gratuit uniquement |
-| `credentials.json` | Identifiants OAuth | Pas exploitable sans token |
-| `token.json` | ⚠️ Accès Gmail + Drive | Le plus sensible |
-
-**Verrouiller les droits sur le dossier :**
-
+**Sur le poste cible :**
 ```powershell
-# En PowerShell administrateur
-icacls "C:\Automatisch" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+# Extraire
+Expand-Archive -Path C:\Factur-X-backup.zip -DestinationPath C:\Factur-X-project -Force
+
+cd C:\Factur-X-project
+
+# Supprimer l'ancien token (invalide sur le nouveau poste)
+del orchestrator\token.json
+
+# Régénérer le token (voir section 6.5) puis lancer
+docker compose up -d --build
 ```
+
+> `token.json` est lié à une session d'autorisation spécifique.
+> Il doit être régénéré sur chaque nouveau poste, même si `credentials.json` est identique.
+
+### Redémarrage automatique avec le PC
+
+Le conteneur est configuré avec `restart: unless-stopped`. Il redémarre automatiquement quand Docker redémarre.
+
+**Windows (Docker Desktop) :**
+- Settings → General → Cocher **"Start Docker Desktop when you sign in to your computer"**
+
+**Linux (systemd) :**
+```bash
+sudo systemctl enable docker
+```
+
+Cycle quotidien normal :
+1. Vous allumez le PC
+2. Docker Desktop démarre automatiquement
+3. Le conteneur `orchestrator` redémarre automatiquement
+4. Le polling Gmail reprend — rien à faire
+
+> `docker compose down` **supprime** les conteneurs → pas de restart automatique au boot.
+> Réservez cette commande à la maintenance. Pour l'usage quotidien, éteignez le PC normalement.
 
 ---
 
-## Partie 8 — Commandes utiles et dépannage
+## 9. Commandes utiles et dépannage
 
-### Commandes quotidiennes
+### Commandes du quotidien
 
-```powershell
-docker compose ps                     # État du conteneur
-docker compose logs -f orchestrator   # Logs temps réel
-docker compose restart orchestrator   # Forcer un scan immédiat
+```bash
+docker compose ps                              # État du conteneur
+docker compose logs -f orchestrator            # Logs en temps réel
+docker compose logs --tail 50 orchestrator     # 50 dernières lignes
+docker compose restart orchestrator            # Forcer un scan immédiat
+```
+
+### Gérer le cycle de vie
+
+```bash
+docker compose stop                # Arrête (conservé → restart au boot)
+docker compose start               # Redémarre après un stop
+docker compose down                # ⚠️ Supprime le conteneur
+docker compose up -d               # Recrée après un down
+docker compose up -d --build       # Reconstruit l'image (après modif du code)
 ```
 
 ### Après modification du code
 
-```powershell
-# Un seul conteneur → un seul rebuild
+```bash
 docker compose up -d --build
 ```
 
-### Après modification du .env
+### Après modification du `.env`
 
-```powershell
-docker compose restart orchestrator    # Pas besoin de --build
+```bash
+docker compose up -d   # Pas besoin de --build
 ```
 
-### Arrêter / relancer
+### Statistiques SQLite
 
-```powershell
-docker compose stop       # Arrête (conserve conteneur → restart au boot)
-docker compose start      # Relance après un stop
-docker compose down       # ⚠️ Supprime conteneur → PAS de restart au boot
-docker compose up -d      # Recrée après un down
+```bash
+docker compose exec orchestrator python3 -c "
+import sqlite3
+conn = sqlite3.connect('/app/data/state.db')
+for row in conn.execute('SELECT status, COUNT(*) FROM processed GROUP BY status'):
+    print(row)
+"
 ```
 
 ### Nettoyage disque
 
-```powershell
+```bash
 docker system prune -f    # Supprime images/conteneurs orphelins
 ```
 
-### Dépannage
+### Dépannage fréquent
 
-**L'orchestrateur redémarre en boucle ("Restarting")** :
-
-```powershell
+**Le conteneur redémarre en boucle :**
+```bash
 docker compose logs --tail 30 orchestrator
 ```
+Causes courantes :
+- `credentials.json` absent ou invalide (vérifier que c'est un fichier, pas un dossier)
+- `token.json` absent → lancer la procédure OAuth (section 6.5)
+- `DRIVE_FOLDER_ID` mal configuré dans `.env` (URL au lieu de l'ID seul)
+- `GEMINI_API_KEY` manquant ou invalide
 
-Causes fréquentes :
-- `credentials.json` manquant ou invalide (vérifier que c'est un fichier, pas un dossier)
-- `token.json` invalide → supprimer et refaire l'OAuth (étape 4.5)
-- `GEMINI_API_KEY` manquante dans `.env`
-
-**Erreur 429 Too Many Requests** : rate limit Gemini. Le retry automatique avec backoff est intégré. Si insuffisant, réduire `MAX_EMAILS_PER_CYCLE` dans `.env`.
-
-**Token Google expiré** : supprimer `token.json`, refaire l'autorisation OAuth (étape 4.5).
-
-**`DRIVE_FOLDER_ID` incorrect** : vérifier qu'il contient uniquement l'ID (pas l'URL, pas de `?usp=drive_link`).
-
-**PDF rejeté à tort** : vérifier les logs nœud `filter_document`. Si le score est trop bas pour une vraie facture, augmenter le seuil dans `facturx.py` (`score < 2` → `score < 1`).
-
-**Le nœud `call_gemini` échoue systématiquement** : vérifier `GEMINI_API_KEY` et le quota journalier (`MAX_GEMINI_REQUESTS_PER_DAY`).
-
----
-
-## Partie 9 — Limites et évolutions futures
-
-### Limites actuelles
-
-| Limite | Impact | Solution |
-|--------|--------|----------|
-| Rate limit Gemini | ~15 req/min tier gratuit | Backoff + pause 15s intégrés |
-| Token OAuth 6 mois | Expire si PC éteint 6 mois | Refaire l'OAuth |
-| PDF scannés illisibles | OCR Tesseract échoue | Nœud `extract_text` rejette → log |
-| Emails non-factures rescannés | Re-analysés (rejetés localement) | `newer_than:7d` limite le bruit |
-| Un seul compte Gmail | Une seule boîte scannée | Dupliquer l'orchestrateur |
-
-### Évolutions futures
-
-LangGraph permet d'ajouter des nœuds facilement : une fonction Python + une ligne dans `graph.py`.
-
-**Court terme** : enrichissement SIRET (API INSEE), détection doublons Drive, Google Sheets de suivi, notifications email/Slack.
-
-**Moyen terme** : agent relance fournisseurs, rapprochement bancaire, tableau de bord web.
-
-**Long terme** : orchestration complète (devis, commandes, factures clients), multi-agents, profil Factur-X EXTENDED.
-
----
-
-## Récapitulatif express : déploiement sur un nouveau poste
-
-```powershell
-# 1. Installer Docker Desktop + cocher "Start on login"
-# 2. Installer Python (cocher "Add to PATH")
-# 3. Copier C:\Automatisch\ depuis l'archive ZIP ou la clé USB
-
-# 4. (Optionnel) Charger l'image si fournie
-docker load -i C:\Automatisch-image.tar
-
-# 5. Autorisation Google OAuth
-pip install google-api-python-client google-auth-oauthlib
-cd C:\Automatisch\orchestrator
-del token.json
-python -c "
-from google_auth_oauthlib.flow import InstalledAppFlow
-flow = InstalledAppFlow.from_client_secrets_file(
-    'credentials.json',
-    ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/drive.file']
-)
-creds = flow.run_local_server(port=8090, open_browser=True)
-with open('token.json', 'w') as f:
-    f.write(creds.to_json())
-print('OK')
-"
-
-# 6. Lancer (--build si pas d'image pré-chargée)
-cd C:\Automatisch
-docker compose up -d --build
-
-# 7. Vérifier
-docker compose ps
-docker compose logs orchestrator
-
-# C'est fait. La solution tourne et redémarre toute seule avec le PC.
+**Token Google expiré :**
+```bash
+# Linux/Mac
+rm orchestrator/token.json
+# Windows
+del orchestrator\token.json
 ```
+Régénérer le token (section 6.5) puis relancer `docker compose up -d`.
+
+**Erreur 429 Gemini (rate limit) :**
+Le backoff exponentiel est intégré. L'email sera retenté au cycle suivant (rien n'est inscrit en SQLite pour ce cas). Si le problème persiste, réduire `MAX_EMAILS_PER_CYCLE` dans `.env`.
+
+**`DRIVE_FOLDER_ID` incorrect :**
+L'ID est uniquement la chaîne après `/folders/` dans l'URL Drive, sans le `?usp=drive_link`.
+
+---
+
+## 10. CI/CD et tests
+
+Le workflow GitHub Actions (`.github/workflows/validate-facturx.yml`) s'exécute sur chaque push et pull request :
+
+```
+push / PR
+    │
+    ├── Validate PDF/A avec veraPDF (si des PDFs de test sont présents)
+    └── Validate embedded Factur-X XML (tools/ci_validate_facturx.py)
+         └── Vérifie : namespace CII, champs obligatoires EN16931,
+                       validité du XML embarqué dans les PDFs de test
+```
+
+**Lancer les tests localement :**
+```bash
+pip install pypdf lxml pytest
+pytest tests/test_facturx_en16931.py -v
+```
+
+---
+
+## 11. Évolutions futures
+
+LangGraph permet d'ajouter des nœuds sans modifier les existants :
+
+**Court terme**
+- Enrichissement SIRET via API INSEE (nouveau nœud entre `normalize_data` et `generate_xml`)
+- Détection de doublons Drive (nouveau nœud avant `upload_drive`)
+- Export Google Sheets du récapitulatif mensuel (nouveau nœud après `log_result`)
+
+**Moyen terme**
+- Agent de relance fournisseurs (factures impayées après J+30)
+- Rapprochement bancaire automatisé
+- Multi-comptes Gmail (plusieurs instances orchestrateur)
+
+**Long terme**
+- Profil Factur-X **EXTENDED** (données supplémentaires sectorielles)
+- Interface web de supervision (dashboard React + API FastAPI)
+- Déploiement cloud (GCP Cloud Run, AWS ECS)
+
+---
+
+## Licence
+
+MIT — Voir [LICENSE](LICENSE)
+
+---
+
+*Stack : Python 3.12 · LangGraph 0.2 · Gemini 2.5 Flash · Factur-X EN16931 · Docker*
