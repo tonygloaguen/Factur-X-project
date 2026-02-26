@@ -9,7 +9,7 @@ from reportlab.pdfgen import canvas
 # Ajoute orchestrator/ au path pour importer facturx.py directement
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
 
-import facturx as facturx_module
+import facturx_utils as facturx_module
 
 
 def _make_minimal_pdf_bytes() -> bytes:
