@@ -14,7 +14,7 @@ pytest==8.3.2
 PyMuPDF==1.24.14
 
 # PDF — manipulation (injection OutputIntent + XMP pour PDF/A-3b)
-pypdf==4.3.1
+pypdf==6.7.3
 
 # Factur-X — embedding XML dans PDF, validation XSD (norme EN 16931)
 factur-x==3.10.0
