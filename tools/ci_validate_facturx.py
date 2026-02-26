@@ -17,7 +17,11 @@ def extract_facturx_xml(pdf_path: Path, out_dir: Path) -> Path | None:
     Extract embedded 'factur-x.xml' (or any *.xml attachment) using pypdf.
     Returns extracted xml path or None if not found.
     """
-    reader = PdfReader(str(pdf_path))
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception as exc:
+        print(f"[WARN] {pdf_path}: could not parse PDF ({exc}). Skipping.")
+        return None
 
     # pypdf exposes attachments via reader.attachments in recent versions.
     attachments = getattr(reader, "attachments", None)
@@ -30,7 +34,19 @@ def extract_facturx_xml(pdf_path: Path, out_dir: Path) -> Path | None:
     for name in attachments.keys():
         lname = name.lower()
         if lname == "factur-x.xml" or lname.endswith(".xml"):
-            data = attachments[name]
+            try:
+                raw = attachments[name]
+                # pypdf ≥4 returns List[DecodedStreamObject], older versions return bytes
+                if isinstance(raw, (bytes, bytearray)):
+                    data = bytes(raw)
+                elif isinstance(raw, (list, tuple)) and raw:
+                    item = raw[0]
+                    data = item.get_data() if hasattr(item, "get_data") else bytes(item)
+                else:
+                    continue
+            except Exception as exc:
+                print(f"[WARN] {pdf_path}: could not read attachment '{name}' ({exc}). Skipping.")
+                continue
             out_path = out_dir / f"{pdf_path.stem}__{Path(name).name}"
             out_path.write_bytes(data)
             return out_path
