@@ -55,23 +55,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Scan du Dockerfile pour les CVE dans l'image de base et les packages système
+      # Scan de configuration du Dockerfile (USER, HEALTHCHECK, etc.)
+      # exit-code: "1" → bloquant si une misconfiguration est détectée
       - name: Trivy – scan Dockerfile (config)
         uses: aquasecurity/trivy-action@0.29.0
         with:
           scan-type: config
           scan-ref: orchestrator/Dockerfile
-          exit-code: "0"           # non-bloquant : remontée en info
+          exit-code: "1"
           format: table
 
-      # Scan du filesystem pour les CVE dans les dépendances Python (requirements.txt)
+      # Scan des CVE dans les dépendances Python (requirements.txt)
+      # Bloquant sur CRITICAL et HIGH uniquement
       - name: Trivy – scan filesystem (dépendances Python)
         uses: aquasecurity/trivy-action@0.29.0
         with:
           scan-type: fs
           scan-ref: orchestrator/
           scanners: vuln,secret
-          exit-code: "0"           # non-bloquant : remontée en info
+          exit-code: "1"
           format: table
           severity: CRITICAL,HIGH
 
@@ -84,18 +86,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Audit Dockerfile (bonnes pratiques : USER non-root, COPY vs ADD, etc.)
+      # Audit Dockerfile – bloquant
+      # CKV_DOCKER_2 (HEALTHCHECK) et CKV_DOCKER_3 (USER non-root) sont couverts
       - name: Checkov – audit Dockerfile
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: orchestrator/
           framework: dockerfile
-          soft_fail: true           # non-bloquant : remontée en info
+          soft_fail: false
 
-      # Audit du workflow GitHub Actions (permissions, pinning des actions, etc.)
+      # Audit GitHub Actions – bloquant
+      # CKV_GHA_1 (SHA pinning) est skip pour l'instant : haute maintenance, à traiter séparément
       - name: Checkov – audit GitHub Actions
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .github/workflows/
           framework: github_actions
-          soft_fail: true           # non-bloquant : remontée en info
+          soft_fail: false
+          skip_check: CKV_GHA_1
