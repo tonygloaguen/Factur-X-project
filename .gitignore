@@ -63,3 +63,6 @@ ci_extracted_xml/
 # ⚠️ Ne pas committer de vraies factures
 *.pdf
 *.xml
+# Exception : fixtures de test synthétiques (pas de données réelles)
+!tests/fixtures/*.pdf
+!tests/fixtures/*.xml
