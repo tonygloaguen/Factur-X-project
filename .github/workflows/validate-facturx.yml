@@ -28,7 +28,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PyMuPDF factur-x lxml pypdf reportlab requests
+          pip install PyMuPDF factur-x lxml pypdf reportlab requests pytest
 
       - name: Run unit tests
         env:
