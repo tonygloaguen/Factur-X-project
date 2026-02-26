@@ -2,25 +2,39 @@ name: Validate Factur-X (XML EN16931 + Tests unitaires)
 
 on:
   push:
+    branches: [main]       # push limité à main ; les branches de travail passent par les PRs
   pull_request:
   workflow_dispatch:
 
-# CKV2_GHA_1 : permissions minimales explicites (principe du moindre privilège)
+# Annule les runs précédents sur la même branche/PR (économie de minutes CI)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# CKV2_GHA_1 : permissions minimales globales (principe du moindre privilège)
+# Aucun job n'a besoin d'écrire dans le dépôt ou de créer des artefacts GitHub.
 permissions:
   contents: read
 
 jobs:
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Tests unitaires + validation EN16931
+  # ──────────────────────────────────────────────────────────────────────────────
   validate:
-    runs-on: ubuntu-latest
+    name: Validate – Tests unitaires & EN16931
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5.3.0
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt   # clé de cache basée sur le fichier versionné
 
       - name: Install system dependencies (Tesseract + Ghostscript)
         run: |
@@ -29,14 +43,12 @@ jobs:
             tesseract-ocr tesseract-ocr-fra tesseract-ocr-deu tesseract-ocr-eng \
             ghostscript
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install PyMuPDF factur-x lxml pypdf reportlab requests pytest
+      - name: Install Python dependencies (depuis requirements-ci.txt)
+        run: pip install -r requirements-ci.txt
 
       - name: Run unit tests
         env:
-          # FACTURX_PROFILE requis par facturx.py (module-level constant)
+          # FACTURX_PROFILE requis par facturx_utils.py (module-level constant)
           FACTURX_PROFILE: en16931
           GEMINI_API_KEY: dummy-not-called-in-unit-tests
         run: |
@@ -46,17 +58,41 @@ jobs:
         run: |
           python tools/ci_validate_facturx.py
 
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Gitleaks : détection de secrets (bloquant)
+  # ──────────────────────────────────────────────────────────────────────────────
+  gitleaks:
+    name: Gitleaks – détection de secrets
+    runs-on: ubuntu-24.04
+    needs: validate
+
+    steps:
+      - name: Checkout (historique complet)
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0          # historique entier requis pour un scan exhaustif
+
+      - name: Gitleaks – scan secrets (bloquant)
+        # CKV_GHA_1 : à pinner sur un SHA complet lors du passage au SHA pinning global
+        # Repo public → GITHUB_TOKEN suffit ; repo privé → ajouter GITLEAKS_LICENSE secret
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Trivy : scan CVE Dockerfile + dépendances Python (bloquant)
+  # ──────────────────────────────────────────────────────────────────────────────
   trivy:
     name: Trivy – scan CVE (Dockerfile + dépendances)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: validate
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
-      # Scan de configuration du Dockerfile (USER, HEALTHCHECK, etc.)
-      # exit-code: "1" → bloquant si une misconfiguration est détectée
+      # Scan de configuration du Dockerfile (USER non-root, HEALTHCHECK, etc.)
+      # exit-code: "1" → bloquant sur toute misconfiguration détectée
       - name: Trivy – scan Dockerfile (config)
         uses: aquasecurity/trivy-action@0.29.0
         with:
@@ -65,8 +101,7 @@ jobs:
           exit-code: "1"
           format: table
 
-      # Scan des CVE dans les dépendances Python (requirements.txt)
-      # Bloquant sur CRITICAL et HIGH uniquement
+      # Scan CVE + secrets dans le filesystem Python — bloquant CRITICAL et HIGH uniquement
       - name: Trivy – scan filesystem (dépendances Python)
         uses: aquasecurity/trivy-action@0.29.0
         with:
@@ -77,17 +112,20 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
 
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 4 — Checkov : audit IaC Dockerfile + GitHub Actions (bloquant)
+  # ──────────────────────────────────────────────────────────────────────────────
   checkov:
     name: Checkov – audit Dockerfile et workflow
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: validate
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       # Audit Dockerfile – bloquant
-      # CKV_DOCKER_2 (HEALTHCHECK) et CKV_DOCKER_3 (USER non-root) sont couverts
+      # CKV_DOCKER_2 (HEALTHCHECK) et CKV_DOCKER_3 (USER non-root) sont couverts dans le Dockerfile
       - name: Checkov – audit Dockerfile
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -96,7 +134,8 @@ jobs:
           soft_fail: false
 
       # Audit GitHub Actions – bloquant
-      # CKV_GHA_1 (SHA pinning) est skip pour l'instant : haute maintenance, à traiter séparément
+      # CKV_GHA_1 (SHA pinning des actions) est skipé temporairement :
+      # nécessite un outillage dédié (Renovate/Dependabot) — à traiter séparément
       - name: Checkov – audit GitHub Actions
         uses: bridgecrewio/checkov-action@v12
         with:
