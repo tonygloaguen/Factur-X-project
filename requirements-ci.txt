@@ -3,27 +3,27 @@
 # Usage exclusif : pipeline GitHub Actions (validate-facturx.yml)
 # Ne pas utiliser pour l'orchestrateur en production (voir orchestrator/requirements.txt)
 #
-# Pour régénérer avec des versions à jour :
-#   pip install pip-tools
-#   pip-compile requirements-ci.txt --upgrade
+# Contraintes >= : version minimum connue et testée.
+# Pour des versions exactes reproductibles, générer un lockfile :
+#   pip install pip-tools && pip-compile requirements-ci.txt -o requirements-ci.lock
 
 # Tests
-pytest==8.3.2
+pytest>=8.3
 
 # PDF — extraction texte natif + OCR Tesseract
-PyMuPDF==1.24.14
+PyMuPDF>=1.24
 
 # PDF — manipulation (injection OutputIntent + XMP pour PDF/A-3b)
-pypdf==4.3.1
+pypdf>=4.0
 
 # Factur-X — embedding XML dans PDF, validation XSD (norme EN 16931)
-factur-x==3.10.0
+factur-x>=3.10
 
 # XML — génération CII D16B/D22B avec namespaces
-lxml==5.3.0
+lxml>=5.0
 
 # PDF generation (utilisé par certains modules de test)
-reportlab==4.2.2
+reportlab>=4.0
 
 # HTTP — appels API externes (non sollicités en tests unitaires, requis à l'import)
-requests==2.32.3
+requests>=2.31
