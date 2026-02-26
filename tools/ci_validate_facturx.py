@@ -50,8 +50,8 @@ def assert_en16931(xml_bytes: bytes, origin: str):
 def main():
     pdfs = find_pdfs()
     if not pdfs:
-        print("No PDFs found. Skipping XML extraction checks.")
-        return 0
+        print("[ERROR] No PDFs found in the repository. Add Factur-X PDFs under samples/ or tests/fixtures/.")
+        return 1
 
     failures = 0
     extracted_any = False
