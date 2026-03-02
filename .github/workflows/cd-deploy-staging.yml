@@ -1,0 +1,29 @@
+name: cd-deploy-staging
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pre-check Docker
+        run: |
+          docker --version
+          docker compose version || true
+
+      - name: Deploy staging (docker compose)
+        working-directory: /opt/facturx-staging
+        run: |
+          docker compose pull
+          docker compose up -d
+          docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+
+      - name: Functional check
+        run: |
+          curl -sS -I http://localhost:8080 | head -n 20
