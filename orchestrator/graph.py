@@ -49,6 +49,10 @@ Topologie du graphe :
                      └──────┬──────────┘
                             │
                      ┌──────▼──────────┐
+                     │ update_matrix   │ (matrice Excel Drive — coche X fournisseur/mois)
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
                      │   label_gmail   │ (label "Factures-Traitées")
                      └──────┬──────────┘
                             │
@@ -77,6 +81,7 @@ from nodes import (
     node_generate_xml,
     node_embed_facturx,
     node_upload_drive,
+    node_update_matrix,
     node_label_gmail,
     node_log_result,
     route_after_filter,
@@ -98,7 +103,7 @@ def build_graph():
     """
     g = StateGraph(InvoiceState)
 
-    # ── Enregistrement des 9 nœuds ──────────────────────────────────────────
+    # ── Enregistrement des 10 nœuds ─────────────────────────────────────────
     # Format : g.add_node("nom_du_noeud", fonction_du_noeud)
     # Le NOM est la clé utilisée dans les arêtes et les routeurs.
     g.add_node("extract_text",    node_extract_text)
@@ -108,6 +113,7 @@ def build_graph():
     g.add_node("generate_xml",    node_generate_xml)
     g.add_node("embed_facturx",   node_embed_facturx)
     g.add_node("upload_drive",    node_upload_drive)
+    g.add_node("update_matrix",   node_update_matrix)
     g.add_node("label_gmail",     node_label_gmail)
     g.add_node("log_result",      node_log_result)
 
@@ -151,7 +157,8 @@ def build_graph():
     g.add_edge("normalize_data", "generate_xml")
     g.add_edge("generate_xml",   "embed_facturx")
     g.add_edge("embed_facturx",  "upload_drive")
-    g.add_edge("upload_drive",   "label_gmail")
+    g.add_edge("upload_drive",   "update_matrix")
+    g.add_edge("update_matrix",  "label_gmail")
     g.add_edge("label_gmail",    "log_result")
 
     # ── Arête finale : log_result → END ─────────────────────────────────────
