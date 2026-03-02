@@ -1,9 +1,9 @@
 # Factur-X Automation — LangGraph + Gemini + Google APIs
 
 > Automatisation complète du traitement des factures fournisseurs :
-> **Gmail → OCR → Gemini → XML EN16931 → PDF/A-3 → Google Drive**
+> **Gmail → OCR → Gemini → XML EN16931 → PDF/A-3 → Google Drive + Matrice de suivi**
 >
-> Architecture : **1 conteneur Docker**, **9 nœuds LangGraph**, **Pure Python**
+> Architecture : **1 conteneur Docker**, **10 nœuds LangGraph**, **Pure Python**
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
 ![LangGraph](https://img.shields.io/badge/LangGraph-0.2%2B-orange)
@@ -18,7 +18,7 @@
 1. [Présentation du projet](#1-présentation-du-projet)
 2. [Architecture technique](#2-architecture-technique)
 3. [LangGraph — Concepts clés et pédagogie](#3-langgraph--concepts-clés-et-pédagogie)
-4. [Les 9 nœuds du workflow](#4-les-9-nœuds-du-workflow)
+4. [Les 10 nœuds du workflow](#4-les-10-nœuds-du-workflow)
 5. [Installation locale depuis le repo](#5-installation-locale-depuis-le-repo)
 6. [Configuration Google OAuth2 (credentials)](#6-configuration-google-oauth2-credentials)
 7. [Lancement et vérification](#7-lancement-et-vérification)
@@ -43,9 +43,9 @@ Un agent autonome surveille une boîte Gmail, détecte les PDFs de factures, les
 
 | Compétence | Implémentation |
 |---|---|
-| **LangGraph** | Workflow orienté graphe, 9 nœuds, routage conditionnel |
+| **LangGraph** | Workflow orienté graphe, 10 nœuds, routage conditionnel |
 | **Gemini API** | Extraction structurée JSON depuis PDF OCR |
-| **Google APIs** | Gmail OAuth2, Drive v3, gestion des tokens |
+| **Google APIs** | Gmail OAuth2, Drive v3, Sheets v4, gestion des tokens |
 | **Standard Factur-X** | XML CII D16B, profil EN16931, PDF/A-3b |
 | **Python avancé** | TypedDict, SQLite WAL, backoff exponentiel, injection de dépendances |
 | **Docker** | Conteneur autonome, volumes persistants, restart policy |
@@ -65,13 +65,13 @@ Un agent autonome surveille une boîte Gmail, détecte les PDFs de factures, les
 │     └──► Pour chaque PDF détecté :                             │
 │             workflow.invoke(état_initial)                       │
 │                  │                                              │
-│                  ▼  LangGraph exécute les 9 nœuds              │
+│                  ▼  LangGraph exécute les 10 nœuds             │
 │       ┌──────────────────────────────────┐                      │
 │       │  extract_text → filter_document  │                      │
 │       │  → call_gemini → normalize_data  │                      │
 │       │  → generate_xml → embed_facturx  │                      │
-│       │  → upload_drive → label_gmail    │                      │
-│       │  → log_result                    │                      │
+│       │  → upload_drive → update_matrix  │                      │
+│       │  → label_gmail  → log_result     │                      │
 │       └──────────────────────────────────┘                      │
 │                                                                 │
 │  Volumes persistants :                                          │
@@ -110,7 +110,7 @@ Factur-X-project/
 │   │
 │   ├── main.py                     ← Point d'entrée : boucle polling Gmail
 │   ├── graph.py                    ← Topologie du graphe (nœuds + arêtes)
-│   ├── nodes.py                    ← Les 9 nœuds + 2 routeurs
+│   ├── nodes.py                    ← Les 10 nœuds + 2 routeurs
 │   ├── state.py                    ← TypedDict InvoiceState (état partagé)
 │   ├── services.py                 ← GoogleServices + StateDB (SQLite)
 │   └── facturx_utils.py            ← Fonctions métier pures (OCR, XML, PDF)
@@ -269,7 +269,7 @@ workflow.invoke(initial_state)
 
 ---
 
-## 4. Les 9 nœuds du workflow
+## 4. Les 10 nœuds du workflow
 
 ```
                      ┌──────────────┐
@@ -305,6 +305,10 @@ workflow.invoke(initial_state)
                      └──────┬──────────┘
                             │
                      ┌──────▼──────────┐
+                     │ update_matrix   │  Coche "X" dans la matrice Excel Drive
+                     └──────┬──────────┘
+                            │
+                     ┌──────▼──────────┐
                      │   label_gmail   │  Label "Factures-Traitées" sur l'email
                      └──────┬──────────┘
                             │
@@ -324,8 +328,28 @@ workflow.invoke(initial_state)
 | 5 | `generate_xml` | Génération XML CII D16B/D22B | Gratuit |
 | 6 | `embed_facturx` | Assemblage PDF/A-3b avec XML embarqué | Gratuit |
 | 7 | `upload_drive` | Upload dans sous-dossier Drive mensuel | Gratuit |
-| 8 | `label_gmail` | Application du label sur l'email source | Gratuit |
-| 9 | `log_result` | Écriture SQLite + logs structurés | Gratuit |
+| 8 | `update_matrix` | Coche "X" fournisseur/mois dans `Suivi_Transmission_Factures_Comptable.xlsx` | Gratuit |
+| 9 | `label_gmail` | Application du label sur l'email source | Gratuit |
+| 10 | `log_result` | Écriture SQLite + logs structurés | Gratuit |
+
+### Nœud 8 — `update_matrix` : matrice de suivi fournisseurs
+
+Après chaque upload réussi sur Drive, ce nœud met à jour automatiquement la feuille Excel de suivi `Suivi_Transmission_Factures_Comptable.xlsx` hébergée sur Google Drive.
+
+**Structure de la matrice :**
+```
+| Client     | Référence facture | Octobre 2025 | Novembre 2025 | Mars 2026 | ...
+|------------|-------------------|--------------|---------------|-----------|
+| GARNIER    | GPDIS             |              |       X       |           |
+| BAUDE      | MSA               |       X      |               |           |
+| WHHITECHURCH | INTERBAT        |              |       X       |           |
+```
+
+**Logique de matching :**
+- **Colonne du mois** : recherche l'en-tête `"Mois AAAA"` (ex: `"Mars 2026"`) basée sur la date de la facture
+- **Ligne fournisseur** : col A = nom du client (acheteur), col B = nom du fournisseur (vendeur)
+- Correspondance **partielle et insensible** à la casse et aux accents (`"MSA FRANCE"` trouve `"MSA"`)
+- **Non-bloquant** : si la ligne n'est pas trouvée ou si l'API Sheets échoue, un `[WARN]` est loggé et le workflow continue normalement
 
 ### Anti-retraitement SQLite
 
@@ -381,6 +405,11 @@ FACTURX_PROFILE=en16931
 # → DRIVE_FOLDER_ID=1cPFMtFhN-VOnPJ...   (sans le ?usp=drive_link)
 DRIVE_FOLDER_ID=identifiant_dossier_drive
 
+# ID Google Sheets de la matrice de suivi fournisseurs
+# Fichier : Suivi_Transmission_Factures_Comptable.xlsx
+# URL     : https://docs.google.com/spreadsheets/d/[CET_ID]/edit
+DRIVE_MATRIX_FILE_ID=1drSsQQVtgniDLg5vHK2jTTadP3EYgm-b
+
 # ── Gmail polling ─────────────────────────────────────────────────
 # Intervalle de polling en secondes (900 = 15 minutes)
 POLL_INTERVAL=900
@@ -395,6 +424,7 @@ GMAIL_QUERY=has:attachment filename:pdf -label:Factures-Traitées newer_than:7d
 > **Points critiques :**
 > - `FACTURX_PROFILE` : doit être `en16931` en minuscules exactement
 > - `DRIVE_FOLDER_ID` : uniquement l'ID (la partie après `/folders/`), jamais l'URL complète
+> - `DRIVE_MATRIX_FILE_ID` : l'ID dans l'URL `spreadsheets/d/[ID]/edit` — déjà pré-rempli avec le fichier actuel
 > - Ne commitez jamais ce fichier (il est dans `.gitignore`)
 
 ### Étape 3 — Créer le répertoire de données
@@ -433,9 +463,10 @@ Dans **Google Auth Platform** (anciennement "Écran de consentement OAuth") :
 
 1. **Branding** : Nom de l'app = `Factures-Auto`, email d'assistance = votre email
 2. **Audience** : Type = **Externe**, ajoutez votre email en **utilisateur test**
-3. **Accès aux données** (Scopes) : ajoutez ces deux scopes :
+3. **Accès aux données** (Scopes) : ajoutez ces trois scopes :
    - `https://www.googleapis.com/auth/gmail.modify`
    - `https://www.googleapis.com/auth/drive.file`
+   - `https://www.googleapis.com/auth/spreadsheets`
 
 ### 6.4 — Créer les identifiants OAuth
 
@@ -466,7 +497,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 flow = InstalledAppFlow.from_client_secrets_file(
     'credentials.json',
     ['https://www.googleapis.com/auth/gmail.modify',
-     'https://www.googleapis.com/auth/drive.file']
+     'https://www.googleapis.com/auth/drive.file',
+     'https://www.googleapis.com/auth/spreadsheets']
 )
 creds = flow.run_local_server(port=8090, open_browser=True)
 with open('token.json', 'w') as f:
@@ -486,7 +518,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 flow = InstalledAppFlow.from_client_secrets_file(
     'credentials.json',
     ['https://www.googleapis.com/auth/gmail.modify',
-     'https://www.googleapis.com/auth/drive.file']
+     'https://www.googleapis.com/auth/drive.file',
+     'https://www.googleapis.com/auth/spreadsheets']
 )
 creds = flow.run_local_server(port=8090, open_browser=True)
 with open('token.json', 'w') as f:
@@ -562,7 +595,7 @@ Logs normaux attendus :
 2026-02-26 10:00:00 [INFO] ============================================================
 2026-02-26 10:00:01 [INFO] StateDB ouverte : /app/data/state.db
 2026-02-26 10:00:02 [INFO] Connexion Google OK
-2026-02-26 10:00:02 [INFO] Graphe LangGraph compilé (9 nœuds)
+2026-02-26 10:00:02 [INFO] Graphe LangGraph compilé (10 nœuds)
 2026-02-26 10:00:02 [INFO] Démarrage de la boucle de polling...
 2026-02-26 10:00:03 [INFO] Aucun nouvel email avec facture détecté
 2026-02-26 10:00:03 [INFO] Prochaine vérification dans 900 secondes...
@@ -578,14 +611,15 @@ Logs de traitement attendus :
 ```
 [INFO] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [INFO] Nouvel email : 'Facture EDF Février 2026' de noreply@edf.fr
-[INFO] [ 1/9 ] extract_text : facture_edf.pdf (142 Ko)
-[INFO] [ 2/9 ] filter_document : candidat facture (score 8/10)
-[INFO] [ 3/9 ] call_gemini : appel API...
-[INFO] [ 4/9 ] normalize_data : 3 lignes, TVA 20%, TTC 245.60€
-[INFO] [ 5/9 ] generate_xml : XML EN16931 généré (4821 bytes)
-[INFO] [ 6/9 ] embed_facturx : PDF/A-3b créé (187 Ko)
-[INFO] [ 7/9 ] upload_drive : → 2026-02 Février/
-[INFO] [ 8/9 ] label_gmail : label 'Factures-Traitées' appliqué
+[INFO] [ 1/10] extract_text : facture_edf.pdf (142 Ko)
+[INFO] [ 2/10] filter_document : candidat facture (score 8/10)
+[INFO] [ 3/10] call_gemini : appel API...
+[INFO] [ 4/10] normalize_data : 3 lignes, TVA 20%, TTC 245.60€
+[INFO] [ 5/10] generate_xml : XML EN16931 généré (4821 bytes)
+[INFO] [ 6/10] embed_facturx : PDF/A-3b créé (187 Ko)
+[INFO] [ 7/10] upload_drive : → 2026-02 Février/
+[INFO] [ 8/10] update_matrix : X écrit en E12 (fournisseur=EDF, client=GARNIER, mois=Février 2026)
+[INFO] [ 9/10] label_gmail : label 'Factures-Traitées' appliqué
 [INFO] ✅ Succès : EDF | INV-2026-02-001 | 245.60 € TTC → https://drive.google.com/...
 ```
 
@@ -731,14 +765,17 @@ Causes courantes :
 - `DRIVE_FOLDER_ID` mal configuré dans `.env` (URL au lieu de l'ID seul)
 - `GEMINI_API_KEY` manquant ou invalide
 
-**Token Google expiré :**
+**Token Google expiré ou scopes insuffisants (erreur 403 sur Sheets) :**
 ```bash
 # Linux/Mac
 rm orchestrator/token.json
 # Windows
 del orchestrator\token.json
 ```
-Régénérer le token (section 6.5) puis relancer `docker compose up -d`.
+Régénérer le token (section 6.5) en incluant bien les 3 scopes (gmail, drive, spreadsheets) puis relancer `docker compose up -d`.
+
+> Si vous avez ajouté le scope `spreadsheets` après une première utilisation, l'ancien `token.json`
+> ne contient pas ce scope. Supprimez-le et régénérez-le pour que la mise à jour de la matrice fonctionne.
 
 **Erreur 429 Gemini (rate limit) :**
 Le backoff exponentiel est intégré. L'email sera retenté au cycle suivant (rien n'est inscrit en SQLite pour ce cas). Si le problème persiste, réduire `MAX_EMAILS_PER_CYCLE` dans `.env`.
@@ -776,7 +813,7 @@ LangGraph permet d'ajouter des nœuds sans modifier les existants :
 **Court terme**
 - Enrichissement SIRET via API INSEE (nouveau nœud entre `normalize_data` et `generate_xml`)
 - Détection de doublons Drive (nouveau nœud avant `upload_drive`)
-- Export Google Sheets du récapitulatif mensuel (nouveau nœud après `log_result`)
+- Coloration conditionnelle de la cellule dans la matrice (vert si reçu dans les délais)
 
 **Moyen terme**
 - Agent de relance fournisseurs (factures impayées après J+30)
