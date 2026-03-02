@@ -29,7 +29,8 @@ jobs:
       - name: Compute tags
         run: |
           echo "SHA_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-          echo "IMAGE=ghcr.io/${{ github.repository }}/orchestrator" >> $GITHUB_ENV
+          REPO_LC="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=ghcr.io/${REPO_LC}/orchestrator" >> $GITHUB_ENV
 
       - name: Build image
         run: |
