@@ -30,6 +30,9 @@ services:
       # ── Google Drive ─────────────────────────────────────────────────────
       # ID du dossier racine Drive (extrait de l'URL, pas l'URL entière)
       - DRIVE_FOLDER_ID=${DRIVE_FOLDER_ID:-}
+      # ID Google Sheets de la matrice de suivi fournisseurs
+      # (Suivi_Transmission_Factures_Comptable.xlsx)
+      - DRIVE_MATRIX_FILE_ID=${DRIVE_MATRIX_FILE_ID:-1drSsQQVtgniDLg5vHK2jTTadP3EYgm-b}
 
       # ── Gmail ────────────────────────────────────────────────────────────
       # Intervalle de polling en secondes (900 = 15 minutes)

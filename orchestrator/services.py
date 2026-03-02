@@ -23,10 +23,12 @@ from googleapiclient.discovery import build
 
 logger = logging.getLogger("orchestrator")
 
-# Scopes OAuth2 requis pour Gmail (lecture/modification) et Drive (upload)
+# Scopes OAuth2 requis pour Gmail (lecture/modification), Drive (upload)
+# et Sheets (mise à jour de la matrice de suivi fournisseurs)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 CREDENTIALS_FILE = Path("/app/credentials.json")
@@ -100,11 +102,12 @@ class GoogleServices:
     Le label Gmail est mis en cache (évite un appel API list à chaque email).
     """
 
-    __slots__ = ("gmail", "drive", "_label_id")
+    __slots__ = ("gmail", "drive", "sheets", "_label_id")
 
     def __init__(self, creds: Credentials):
         self.gmail = build("gmail", "v1", credentials=creds)
         self.drive = build("drive", "v3", credentials=creds)
+        self.sheets = build("sheets", "v4", credentials=creds)
         self._label_id: str | None = None
 
     def get_or_create_label(self, label_name: str) -> str:

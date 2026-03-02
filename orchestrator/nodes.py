@@ -52,8 +52,8 @@ Workflow des 9 nœuds :
 import io
 import logging
 import os
-
-import requests
+import unicodedata
+from datetime import datetime
 from googleapiclient.http import MediaIoBaseUpload
 
 from state import InvoiceState
@@ -74,6 +74,33 @@ logger = logging.getLogger("orchestrator")
 # Variables d'environnement lues une seule fois au chargement du module
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 GMAIL_LABEL_NAME = os.environ.get("GMAIL_LABEL", "Factures-Traitées")
+DRIVE_MATRIX_FILE_ID = os.environ.get("DRIVE_MATRIX_FILE_ID", "")
+
+# Noms des mois en français (pour la recherche de colonne dans la matrice)
+_MOIS_FR = {
+    1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
+    5: "Mai", 6: "Juin", 7: "Juillet", 8: "Août",
+    9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
+}
+
+
+def _col_letter(idx: int) -> str:
+    """Convertit un index de colonne 0-based en notation lettre A1 (A, B, ..., Z, AA, ...)."""
+    result = ""
+    idx += 1
+    while idx:
+        idx, rem = divmod(idx - 1, 26)
+        result = chr(ord("A") + rem) + result
+    return result
+
+
+def _norm(s: str) -> str:
+    """Normalise une chaîne : minuscules + suppression des accents (pour la correspondance floue)."""
+    return (
+        unicodedata.normalize("NFD", str(s).lower().strip())
+        .encode("ascii", "ignore")
+        .decode()
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,7 +404,117 @@ def node_upload_drive(state: InvoiceState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Nœud 8 : label_gmail — Labellisation Gmail
+# Nœud 8 : update_matrix — Mise à jour de la matrice Excel de suivi
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_update_matrix(state: InvoiceState) -> dict:
+    """
+    Coche la matrice Excel Suivi_Transmission_Factures_Comptable.xlsx sur Drive.
+
+    Recherche la ligne (client=acheteur, fournisseur=vendeur) et pose un "X"
+    dans la colonne correspondant au mois de la facture.
+
+    Matching : correspondance partielle insensible à la casse et aux accents.
+    Non-bloquant : toute erreur est loggée mais ne stoppe pas le workflow.
+
+    Pré-requis : variable d'env DRIVE_MATRIX_FILE_ID (ID Google Sheets).
+    """
+    if state.get("processing_error"):
+        return {}
+    if not DRIVE_MATRIX_FILE_ID:
+        return {}
+
+    inv = state.get("invoice_data", {})
+    vendor_name = inv.get("vendeur", {}).get("nom", "")
+    buyer_name = inv.get("acheteur", {}).get("nom", "")
+    invoice_date = inv.get("date_facture", "")
+
+    if not vendor_name:
+        logger.warning("[ 8/10] update_matrix : nom fournisseur manquant, skip")
+        return {}
+
+    # Déterminer le label de mois (ex: "Mars 2026")
+    try:
+        dt = datetime.strptime(invoice_date[:10], "%Y-%m-%d") if invoice_date else datetime.now()
+    except (ValueError, TypeError):
+        dt = datetime.now()
+    month_label = f"{_MOIS_FR[dt.month]} {dt.year}"
+
+    services: GoogleServices = state["services"]
+    logger.info(
+        "[ 8/10] update_matrix : fournisseur='%s' client='%s' mois='%s'",
+        vendor_name, buyer_name, month_label,
+    )
+
+    try:
+        # Lire toute la feuille (colonnes A à Z suffisent, ~15 colonnes max)
+        result = services.sheets.spreadsheets().values().get(
+            spreadsheetId=DRIVE_MATRIX_FILE_ID,
+            range="A:Z",
+        ).execute()
+        rows = result.get("values", [])
+
+        if not rows:
+            logger.warning("[ 8/10] update_matrix : feuille vide")
+            return {}
+
+        # Trouver la colonne du mois dans la ligne d'en-tête (ligne 0)
+        header = rows[0]
+        month_norm = _norm(month_label)
+        col_idx = next(
+            (i for i, h in enumerate(header) if _norm(h) == month_norm),
+            None,
+        )
+        if col_idx is None:
+            logger.warning("[ 8/10] update_matrix : colonne '%s' introuvable dans la matrice", month_label)
+            return {}
+
+        # Trouver la ligne : col A = client (acheteur), col B = fournisseur (vendeur)
+        vendor_norm = _norm(vendor_name)
+        buyer_norm = _norm(buyer_name) if buyer_name else None
+
+        row_idx = None
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue  # Ignorer l'en-tête
+            cell_a = _norm(row[0]) if len(row) > 0 else ""
+            cell_b = _norm(row[1]) if len(row) > 1 else ""
+            # Correspondance partielle : le nom extrait peut être tronqué
+            vendor_match = vendor_norm in cell_b or cell_b in vendor_norm
+            buyer_match = buyer_norm is None or buyer_norm in cell_a or cell_a in buyer_norm
+            if vendor_match and buyer_match and cell_b:  # cell_b non vide (évite les lignes séparatrices)
+                row_idx = i
+                break
+
+        if row_idx is None:
+            logger.warning(
+                "[ 8/10] update_matrix : aucune ligne pour fournisseur='%s' / client='%s'",
+                vendor_name, buyer_name,
+            )
+            return {}
+
+        # Écrire "X" dans la cellule (notation A1 — Sheets est 1-indexed)
+        cell_ref = f"{_col_letter(col_idx)}{row_idx + 1}"
+        services.sheets.spreadsheets().values().update(
+            spreadsheetId=DRIVE_MATRIX_FILE_ID,
+            range=cell_ref,
+            valueInputOption="RAW",
+            body={"values": [["X"]]},
+        ).execute()
+
+        logger.info(
+            "[ 8/10] update_matrix : X écrit en %s (fournisseur=%s, client=%s, mois=%s)",
+            cell_ref, vendor_name, buyer_name, month_label,
+        )
+
+    except Exception as e:
+        logger.error("[ 8/10] update_matrix : erreur non-bloquante — %s", e)
+
+    return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nœud 9 : label_gmail — Labellisation Gmail
 # ─────────────────────────────────────────────────────────────────────────────
 
 def node_label_gmail(state: InvoiceState) -> dict:
