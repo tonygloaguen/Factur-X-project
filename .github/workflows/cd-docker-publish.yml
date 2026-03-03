@@ -12,7 +12,6 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
-    # Permissions élevées uniquement pour ce job (nécessaire pour GHCR)
     permissions:
       contents: read
       packages: write
@@ -20,6 +19,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.3.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.8.0
@@ -37,13 +39,11 @@ jobs:
           REPO_LC="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           echo "IMAGE=ghcr.io/${REPO_LC}/orchestrator" >> $GITHUB_ENV
 
-      - name: Build image
+      - name: Build & push (multi-arch)
         run: |
-          docker build \
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
             -f orchestrator/Dockerfile \
             -t $IMAGE:${{ env.SHA_SHORT }} \
+            --push \
             orchestrator
-
-      - name: Push image
-        run: |
-          docker push $IMAGE:${{ env.SHA_SHORT }}
