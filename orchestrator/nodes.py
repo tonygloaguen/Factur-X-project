@@ -52,6 +52,7 @@ Workflow des 9 nœuds :
 import io
 import logging
 import os
+import re
 import unicodedata
 from datetime import datetime
 
@@ -568,9 +569,25 @@ def node_update_matrix(state: InvoiceState) -> dict:
 # Nœud 9 : label_gmail — Labellisation Gmail
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _normalize_supplier_name(name: str) -> str:
+    """Normalise le nom fournisseur pour le label Gmail 'Fournisseurs/{name}'.
+
+    Retire les formes juridiques courantes et nettoie les espaces multiples.
+    La casse est conservée pour permettre la correspondance case-insensitive
+    avec les labels Gmail existants (via get_or_create_label).
+    """
+    if not name:
+        return "Inconnu"
+    name = re.sub(r"\b(SAS|SARL|SA|SCI|EURL|EI|SNC)\b", "", name, flags=re.IGNORECASE).strip()
+    name = re.sub(r"\s+", " ", name).strip()
+    return name or "Inconnu"
+
+
 def node_label_gmail(state: InvoiceState) -> dict:
     """
-    Applique le label 'Factures-Traitées' à l'email Gmail.
+    Applique deux labels Gmail à l'email traité :
+    - 'Factures-Traitées' : anti-replay indispensable pour le polling
+    - 'Fournisseurs/{nom}' : classement par fournisseur
 
     Skippé si le traitement amont a échoué (guard clause) :
     pas de label si le fichier n'est pas sur Drive.
@@ -581,16 +598,33 @@ def node_label_gmail(state: InvoiceState) -> dict:
         return {}
 
     services: GoogleServices = state["services"]
-    logger.info("[ 8/9 ] label_gmail : label '%s' → email %s...", GMAIL_LABEL_NAME, state["message_id"])
+
+    # Extraire le nom du fournisseur depuis invoice_data
+    invoice_data = state.get("invoice_data") or {}
+    vendeur = invoice_data.get("vendeur") or {}
+    raw_name = vendeur.get("nom_court") or vendeur.get("nom") or ""
+    supplier_name = _normalize_supplier_name(raw_name)
+    supplier_label = f"Fournisseurs/{supplier_name}"
+
+    logger.info(
+        "[ 8/9 ] label_gmail : labels '%s' + '%s' → email %s...",
+        GMAIL_LABEL_NAME, supplier_label, state["message_id"],
+    )
 
     try:
-        label_id = services.get_or_create_label(GMAIL_LABEL_NAME)
+        label_ids = [
+            services.get_or_create_label(GMAIL_LABEL_NAME),
+            services.get_or_create_label(supplier_label),
+        ]
         services.gmail.users().messages().modify(
             userId="me",
             id=state["message_id"],
-            body={"addLabelIds": [label_id]},
+            body={"addLabelIds": label_ids},
         ).execute()
-        logger.info("Label Gmail appliqué avec succès")
+        logger.info(
+            "Labels '%s' + '%s' appliqués à l'email %s",
+            GMAIL_LABEL_NAME, supplier_label, state["message_id"],
+        )
 
     except Exception as e:
         # Erreur non-bloquante : le fichier est déjà sur Drive
