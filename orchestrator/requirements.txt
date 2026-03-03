@@ -6,6 +6,9 @@
 # ── LangGraph (framework de workflow par graphe) ─────────────────────────────
 langgraph>=0.2
 
+# ── Pydantic v2 : validation des outputs LLM (schemas.py) ───────────────────
+pydantic>=2.0
+
 # ── Google APIs (Gmail + Drive, OAuth2) ──────────────────────────────────────
 google-api-python-client>=2.100
 google-auth-httplib2>=0.2
