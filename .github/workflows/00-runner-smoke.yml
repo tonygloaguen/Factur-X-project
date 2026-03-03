@@ -9,6 +9,7 @@ permissions:
 jobs:
   smoke:
     runs-on: self-hosted
+    permissions: {}
     steps:
       - name: Identity check
         run: |
