@@ -54,6 +54,8 @@ import logging
 import os
 import unicodedata
 from datetime import datetime
+
+import requests
 from googleapiclient.http import MediaIoBaseUpload
 
 from state import InvoiceState

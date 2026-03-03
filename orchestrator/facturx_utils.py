@@ -50,9 +50,11 @@ logger = logging.getLogger("orchestrator")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_URL = (
+# CKV_SEC_1 : la clé API est passée en header (x-goog-api-key) et NON dans l'URL
+# pour éviter qu'elle apparaisse dans les logs HTTP (access logs, proxies, HAR, etc.)
+GEMINI_BASE_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    f"{GEMINI_MODEL}:generateContent"
 )
 
 FACTURX_PROFILE = os.environ.get("FACTURX_PROFILE", "en16931").strip().lower()
@@ -327,15 +329,20 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
         "generationConfig": {
             "temperature": 0.1,               # Déterministe (extraction, pas créatif)
             "responseMimeType": "application/json",
+            "maxOutputTokens": 4096,          # Budget token explicite (évite les réponses runaway)
         },
     }
 
     max_attempts = int(os.environ.get("GEMINI_MAX_ATTEMPTS", "4"))
     base_sleep = float(os.environ.get("GEMINI_BACKOFF_BASE_SECONDS", "5"))
 
+    # CKV_SEC_1 : clé API passée en header x-goog-api-key (pas dans l'URL)
+    # pour éviter qu'elle apparaisse dans les access logs / proxies HTTP
+    _headers = {"x-goog-api-key": GEMINI_API_KEY}
+
     last_status = None
     for attempt in range(1, max_attempts + 1):
-        resp = requests.post(GEMINI_URL, json=payload, timeout=90)
+        resp = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
         last_status = resp.status_code
 
         if resp.status_code == 429:
