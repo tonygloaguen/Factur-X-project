@@ -5,6 +5,7 @@ on:
 
 jobs:
   smoke:
+    permissions: {}
     runs-on: self-hosted
     steps:
       - name: Identity check
