@@ -99,37 +99,52 @@ class GoogleServices:
     Encapsule les clients Gmail et Drive.
 
     Instancié une seule fois au démarrage, partagé pour tous les cycles de polling.
-    Le label Gmail est mis en cache (évite un appel API list à chaque email).
+    Les labels Gmail sont mis en cache dans un dict (évite un appel API list par email).
     """
 
-    __slots__ = ("gmail", "drive", "sheets", "_label_id")
+    __slots__ = ("gmail", "drive", "sheets", "_label_cache")
 
     def __init__(self, creds: Credentials):
         self.gmail = build("gmail", "v1", credentials=creds)
         self.drive = build("drive", "v3", credentials=creds)
         self.sheets = build("sheets", "v4", credentials=creds)
-        self._label_id: str | None = None
+        self._label_cache: dict[str, str] = {}  # {label_name: label_id}
 
     def get_or_create_label(self, label_name: str) -> str:
-        """Retourne l'ID du label Gmail (le crée s'il n'existe pas encore)."""
-        if self._label_id:
-            return self._label_id
+        """Retourne l'ID du label Gmail (le crée s'il n'existe pas encore).
 
+        La recherche est case-insensitive pour éviter les doublons de casse
+        (ex : 'INTERBAT' matche le label existant 'interbat').
+        Le cache est partagé pour tous les appels dans le même processus.
+        """
+        label_name_lower = label_name.lower()
+
+        # Fast path : check cache (case-insensitive)
+        for cached_name, cached_id in self._label_cache.items():
+            if cached_name.lower() == label_name_lower:
+                return cached_id
+
+        # Refresh full label list into cache
         results = self.gmail.users().labels().list(userId="me").execute()
-        for label in results.get("labels", []):
-            if label["name"] == label_name:
-                self._label_id = label["id"]
-                return self._label_id
+        for lbl in results.get("labels", []):
+            self._label_cache[lbl["name"]] = lbl["id"]
 
+        # Check again after refresh (case-insensitive)
+        for cached_name, cached_id in self._label_cache.items():
+            if cached_name.lower() == label_name_lower:
+                return cached_id
+
+        # Label doesn't exist — create it
+        # Gmail imbrique automatiquement "Fournisseurs/Nom" sous "Fournisseurs"
         body = {
             "name": label_name,
             "labelListVisibility": "labelShow",
             "messageListVisibility": "show",
         }
         created = self.gmail.users().labels().create(userId="me", body=body).execute()
-        self._label_id = created["id"]
-        logger.info("Label Gmail créé : %s (ID: %s)", label_name, self._label_id)
-        return self._label_id
+        self._label_cache[created["name"]] = created["id"]
+        logger.info("Label Gmail créé : %s (ID: %s)", created["name"], created["id"])
+        return created["id"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
