@@ -70,6 +70,8 @@ from facturx_utils import (
     embed_facturx_in_pdf,
     build_filename,
     build_folder_name,
+    GeminiJsonDecodeError,
+    MAX_PDF_SIZE_FOR_INVOICE,
 )
 
 logger = logging.getLogger("orchestrator")
@@ -78,6 +80,9 @@ logger = logging.getLogger("orchestrator")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 GMAIL_LABEL_NAME = os.environ.get("GMAIL_LABEL", "Factures-Traitées")
 DRIVE_MATRIX_FILE_ID = os.environ.get("DRIVE_MATRIX_FILE_ID", "")
+# Google Sheet de suivi linéaire des factures traitées (Suivi_Transmission_Factures_Comptable_MAJ)
+# Colonnes : Date | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut
+DRIVE_TRACKING_SHEET_ID = os.environ.get("DRIVE_TRACKING_SHEET_ID", "")
 
 # Noms des mois en français (pour la recherche de colonne dans la matrice)
 _MOIS_FR = {
@@ -159,6 +164,15 @@ def node_filter_document(state: InvoiceState) -> dict:
 
     logger.info("[ 2/9 ] filter_document : analyse keywords...")
 
+    # Garde-fou B : fichier PDF trop volumineux → catalogue/tarif, pas une facture.
+    # Une vraie facture fait rarement plus de 5 Mo (quelques pages A4 scannées).
+    # Exemple : TARIF IN-IPSO 2026 = 14 Mo → rejeté ici avant même l'analyse texte.
+    pdf_size = len(state.get("pdf_bytes", b""))
+    if pdf_size > MAX_PDF_SIZE_FOR_INVOICE:
+        reason = f"file_too_large:{pdf_size}"
+        logger.info("Document rejeté (filtrage local) : %s", reason)
+        return {"processing_error": f"not_invoice:{reason}"}
+
     ok, reason = is_invoice_candidate(state["ocr_text"])
     if not ok:
         logger.info("Document rejeté (filtrage local) : %s", reason)
@@ -217,6 +231,13 @@ def node_call_gemini(state: InvoiceState) -> dict:
         )
         return {"invoice_data": invoice_data, "gemini_used": True}
 
+    except GeminiJsonDecodeError as e:
+        # JSON invalide après nettoyage ET retry → erreur permanente (non-retriable).
+        # Marqué "error" dans SQLite via le préfixe non-"not_invoice".
+        # Statut distinct "erreur_json_permanent" pour faciliter l'audit des logs.
+        logger.error("JSON Gemini invalide de façon permanente — marquage non-retriable : %s", e)
+        return {"gemini_used": True, "processing_error": f"erreur_json_permanent:{e}"}
+
     except requests.exceptions.HTTPError as e:
         resp = getattr(e, "response", None)
         status = getattr(resp, "status_code", None)
@@ -262,6 +283,26 @@ def node_normalize_data(state: InvoiceState) -> dict:
             normalized.get("montant_tva", 0),
             normalized.get("montant_ttc", 0),
         )
+
+        # Garde-fou C : montants nuls ET aucun numéro de facture
+        # → catalogue/tarif mal interprété par Gemini (ex : TARIF IN-IPSO).
+        # ATTENTION : ne pas rejeter si numéro présent même avec TTC=0
+        # (vraies factures SAV avec remise 100% : ex Interbat FA130927).
+        has_invoice_number = bool(normalized.get("numero_facture"))
+        has_amounts = (
+            normalized.get("montant_ttc", 0.0) != 0.0
+            or normalized.get("montant_ht", 0.0) != 0.0
+        )
+        if not has_invoice_number and not has_amounts:
+            logger.info(
+                "Rejeté après normalisation : montants nuls + aucun numéro facture "
+                "(probablement catalogue/tarif mal interprété par Gemini)"
+            )
+            return {
+                "invoice_data": normalized,
+                "processing_error": "not_invoice_gemini:no_number_no_amount",
+            }
+
         return {"invoice_data": normalized}
 
     except Exception as e:
@@ -559,6 +600,53 @@ def node_label_gmail(state: InvoiceState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helper : mise à jour du fichier de suivi linéaire des factures traitées
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _update_tracking_sheet(services: GoogleServices, inv: dict, drive_url: str) -> None:
+    """
+    Ajoute une ligne de suivi dans le Google Sheet Suivi_Transmission_Factures_Comptable_MAJ.
+
+    Colonnes attendues (A→H) :
+      Date traitement | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut
+
+    Non-bloquant : toute erreur est loggée mais ne stoppe pas le workflow.
+    Ignoré si DRIVE_TRACKING_SHEET_ID n'est pas configuré dans l'environnement.
+
+    Garde : les faux positifs (catalogues) ne passent jamais ici car ils sont
+    rejetés avant (garde-fous A/B/C) et n'atteignent pas le branch success de log_result.
+    """
+    if not DRIVE_TRACKING_SHEET_ID:
+        return
+
+    try:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        vendor = (inv.get("vendeur", {}) or {}).get("nom", "Fournisseur inconnu")
+        numero = inv.get("numero_facture") or ""
+        ht = float(inv.get("montant_ht", 0.0) or 0.0)
+        tva = float(inv.get("montant_tva", 0.0) or 0.0)
+        ttc = float(inv.get("montant_ttc", 0.0) or 0.0)
+
+        row = [[now_str, vendor, numero, ht, tva, ttc, drive_url, "success"]]
+
+        services.sheets.spreadsheets().values().append(
+            spreadsheetId=DRIVE_TRACKING_SHEET_ID,
+            range="A:H",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": row},
+        ).execute()
+
+        logger.info(
+            "Suivi MAJ : ligne ajoutée — %s | %s | HT=%.2f€ TTC=%.2f€",
+            vendor, numero, ht, ttc,
+        )
+
+    except Exception as e:
+        logger.error("Erreur mise à jour suivi MAJ (non-bloquant) : %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Nœud 9 : log_result — Log final + écriture SQLite
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -622,6 +710,12 @@ def node_log_result(state: InvoiceState) -> dict:
             detail=f"{vendor} | {numero} | {ttc}€",
             drive_url=url,
         )
+
+        # Mise à jour du fichier de suivi linéaire (non-bloquant)
+        services_obj = state.get("services")
+        if services_obj:
+            _update_tracking_sheet(services_obj, inv, url)
+
         logger.info("✅ Succès : %s | %s | %s€ TTC → %s", vendor, numero, ttc, url)
 
     return {}  # Nœud terminal : aucun champ à mettre à jour

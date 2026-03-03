@@ -89,13 +89,22 @@ DENY_HARD_KEYWORDS = [
 # Deny SOFT : souvent pas une facture, MAIS peut apparaître dans une vraie
 # (ex: assurance pro MSA, mutuelle entreprise...).
 # Bloquer seulement si le score facture est faible (< 3).
+# Note : "rdv" retiré — 3 lettres, trop court, faux positifs fréquents.
 DENY_SOFT_KEYWORDS = [
     "notification", "rappel", "documents en retard",
     "convocation", "attestation",
     "relevé de remboursement", "remboursement",
     "mutuelle", "assurance",
-    "consultation", "rdv", "rendez-vous",
+    "consultation", "rendez-vous",
 ]
+
+# Taille maximale du texte extrait pour être candidat facture.
+# Au-delà de 15 000 caractères, le document est quasi-certainement un
+# catalogue/tarif (ex : TARIF IN-IPSO 2026 : 382 000 chars, 200+ pages).
+MAX_TEXT_LEN_FOR_INVOICE = 15_000
+
+# Taille maximale du fichier PDF pour être candidat facture (5 Mo).
+MAX_PDF_SIZE_FOR_INVOICE = 5_000_000
 
 
 def is_invoice_candidate(text: str) -> tuple[bool, str]:
@@ -107,6 +116,12 @@ def is_invoice_candidate(text: str) -> tuple[bool, str]:
     Gemini confirme ensuite avec "est_facture": true/false.
     """
     text_l = (text or "").lower()
+
+    # Garde-fou A : texte trop long → catalogue/tarif, pas une facture.
+    # Une vraie facture tient en quelques pages (< 15 000 chars).
+    # Exemple : TARIF IN-IPSO 2026 = 382 000 chars → rejeté ici.
+    if len(text_l) > MAX_TEXT_LEN_FOR_INVOICE:
+        return False, f"text_too_long:{len(text_l)}"
 
     # Hard deny : bloque immédiatement
     for kw in DENY_HARD_KEYWORDS:
@@ -300,6 +315,35 @@ Règles CRITIQUES :
 """
 
 
+class GeminiJsonDecodeError(ValueError):
+    """
+    Levée quand le JSON renvoyé par Gemini est invalide après nettoyage ET retry.
+
+    Distincte de ValueError/JSONDecodeError pour permettre au nœud call_gemini
+    de la capturer spécifiquement et d'utiliser le statut 'erreur_json_permanent'
+    (non-retriable dans StateDB, contrairement aux erreurs réseau transitoires).
+    """
+
+
+def clean_gemini_json(raw: str) -> str:
+    """
+    Nettoie le JSON renvoyé par Gemini avant parsing.
+
+    Gemini viole parfois le format JSON malgré responseMimeType="application/json" :
+      - Blocs markdown ```json ... ``` résiduels
+      - Commentaires // en fin de ligne (invalides en JSON)
+      - Virgules trailing avant } ou ] (invalides en JSON)
+    """
+    # Supprimer les blocs markdown ```json ... ```
+    raw = re.sub(r"```json\s*", "", raw)
+    raw = re.sub(r"```\s*$", "", raw, flags=re.MULTILINE)
+    # Supprimer les commentaires // ... en fin de ligne
+    raw = re.sub(r"//[^\n]*", "", raw)
+    # Supprimer les virgules trailing avant } ou ]
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+    return raw.strip()
+
+
 def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     """
     Appelle l'API Gemini pour extraire les données structurées d'une facture.
@@ -307,12 +351,14 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     Gestion des erreurs :
       - 429 (rate limit) : backoff exponentiel avec Retry-After header
       - Autres HTTP 4xx/5xx : raise immédiat (propagé au nœud call_gemini)
+      - JSON invalide : nettoyage + 1 retry → GeminiJsonDecodeError si toujours invalide
 
     Returns:
         dict : données JSON de la facture (champ "est_facture" inclus)
 
     Raises:
         requests.exceptions.HTTPError : erreur HTTP Gemini (dont 429)
+        GeminiJsonDecodeError : JSON invalide après nettoyage et retry
         ValueError : GEMINI_API_KEY non configurée
     """
     if not GEMINI_API_KEY:
@@ -340,7 +386,9 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     # pour éviter qu'elle apparaisse dans les access logs / proxies HTTP
     _headers = {"x-goog-api-key": GEMINI_API_KEY}
 
+    # ── Étape 1 : appel HTTP avec retry 429 ──────────────────────────────────
     last_status = None
+    raw_text = None
     for attempt in range(1, max_attempts + 1):
         resp = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
         last_status = resp.status_code
@@ -363,17 +411,53 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
 
         data = resp.json()
         raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        break  # Réponse HTTP 200 obtenue
 
-        # Nettoyer le markdown éventuel (```json ... ```)
-        cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text.strip())
-        cleaned = re.sub(r"\s*```$", "", cleaned)
+    else:
+        # Toutes les tentatives ont été des 429
+        raise requests.exceptions.HTTPError(
+            f"Gemini rate limit (429) après {max_attempts} tentatives",
+            response=type("R", (), {"status_code": last_status})(),
+        )
 
-        return json.loads(cleaned)
+    # ── Étape 2 : parsing JSON avec nettoyage + 1 retry si invalide ──────────
+    # Gemini peut renvoyer du JSON malformé (trailing commas, commentaires //, etc.)
+    # même avec responseMimeType="application/json". On nettoie et on retente 1 fois.
+    MAX_JSON_RETRIES = 1
+    for json_attempt in range(1 + MAX_JSON_RETRIES):
+        if json_attempt > 0:
+            # Nouvel appel Gemini pour obtenir un JSON valide
+            logger.warning(
+                "JSON Gemini invalide — retry JSON %d/%d (nouvel appel API)...",
+                json_attempt, MAX_JSON_RETRIES,
+            )
+            time.sleep(5)
+            resp2 = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
+            if resp2.status_code >= 400:
+                logger.error("Erreur HTTP Gemini au retry JSON (%d)", resp2.status_code)
+                resp2.raise_for_status()
+            data2 = resp2.json()
+            raw_text = data2["candidates"][0]["content"]["parts"][0]["text"]
 
-    raise requests.exceptions.HTTPError(
-        f"Gemini rate limit (429) après {max_attempts} tentatives",
-        response=type("R", (), {"status_code": last_status})(),
-    )
+        cleaned = clean_gemini_json(raw_text)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            if json_attempt < MAX_JSON_RETRIES:
+                logger.warning(
+                    "JSON Gemini invalide (tentative %d/%d) : %s",
+                    json_attempt + 1, MAX_JSON_RETRIES, e,
+                )
+                logger.debug("JSON brut (500 chars) : %s", raw_text[:500])
+            else:
+                logger.error(
+                    "JSON Gemini invalide même après nettoyage et %d retry : %s",
+                    MAX_JSON_RETRIES, e,
+                )
+                logger.debug("JSON brut (500 chars) : %s", raw_text[:500])
+                raise GeminiJsonDecodeError(
+                    f"JSON invalide après nettoyage et {MAX_JSON_RETRIES} retry : {e}"
+                ) from e
 
 
 # ─────────────────────────────────────────────────────────────────────────────

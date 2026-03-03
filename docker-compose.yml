@@ -47,9 +47,14 @@ services:
       # ── Google Drive ─────────────────────────────────────────────────────
       # ID du dossier racine Drive (extrait de l'URL, pas l'URL entière)
       - DRIVE_FOLDER_ID=${DRIVE_FOLDER_ID:-}
-      # ID Google Sheets de la matrice de suivi fournisseurs
+      # ID Google Sheets de la matrice de suivi fournisseurs (croisé fournisseur × mois)
       # (Suivi_Transmission_Factures_Comptable.xlsx)
       - DRIVE_MATRIX_FILE_ID=${DRIVE_MATRIX_FILE_ID:-1drSsQQVtgniDLg5vHK2jTTadP3EYgm-b}
+      # ID Google Sheets du suivi linéaire des factures traitées (une ligne par facture)
+      # (Suivi_Transmission_Factures_Comptable_MAJ.xlsx converti en Google Sheet)
+      # Colonnes A→H : Date | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut
+      # Laisser vide pour désactiver ce suivi.
+      - DRIVE_TRACKING_SHEET_ID=${DRIVE_TRACKING_SHEET_ID:-}
 
       # ── Gmail ────────────────────────────────────────────────────────────
       # Intervalle de polling en secondes (900 = 15 minutes)
