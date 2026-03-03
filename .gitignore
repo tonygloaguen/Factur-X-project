@@ -7,6 +7,13 @@ orchestrator/**/credentials.json
 orchestrator/**/token*.json
 orchestrator/gmail_token.json
 
+# Clés et certificats — ne jamais committer
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
 
 # =========================
 # Runtime data
