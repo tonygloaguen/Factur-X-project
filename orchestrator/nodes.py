@@ -58,6 +58,7 @@ from datetime import datetime
 import requests
 from googleapiclient.http import MediaIoBaseUpload
 
+from schemas import GeminiInvoiceOutput
 from state import InvoiceState
 from services import GoogleServices, StateDB
 from facturx_utils import (
@@ -193,6 +194,13 @@ def node_call_gemini(state: InvoiceState) -> dict:
 
     try:
         invoice_data = call_gemini(state["ocr_text"], email_context)
+
+        # Validation Pydantic : coerce les types, détecte les hallucinations de type
+        # (ex: montant_ttc="cent euros" → 0.0, lignes=null → [])
+        try:
+            invoice_data = GeminiInvoiceOutput.model_validate(invoice_data).model_dump()
+        except Exception as val_err:
+            logger.warning("Validation Pydantic invoice_data : %s — données brutes conservées", val_err)
 
         if not invoice_data.get("est_facture"):
             logger.info("Gemini : document confirmé non-facture (est_facture=false)")

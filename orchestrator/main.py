@@ -50,6 +50,7 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "900"))
 GMAIL_LABEL_NAME = os.environ.get("GMAIL_LABEL", "Factures-Traitées")
 STATE_DB_PATH = os.environ.get("STATE_DB_PATH", "/app/data/state.db")
 TOKEN_FILE = Path("/app/token.json")
+HEARTBEAT_FILE = Path("/tmp/heartbeat")  # Lu par le HEALTHCHECK Docker
 
 MAX_EMAILS_PER_CYCLE = int(os.environ.get("MAX_EMAILS_PER_CYCLE", "3"))
 MIN_SECONDS_BETWEEN_CALLS = float(os.environ.get("MIN_SECONDS_BETWEEN_CALLS", "15"))
@@ -312,6 +313,11 @@ def main():
 
         except Exception as e:
             logger.error("Erreur dans la boucle principale : %s", e)
+
+        finally:
+            # Mise à jour du heartbeat après chaque cycle (succès ou erreur transitoire)
+            # Le HEALTHCHECK Docker vérifie que ce fichier a moins de 30 min
+            HEARTBEAT_FILE.write_text(str(time.time()))
 
         logger.info("Prochaine vérification dans %d secondes...", POLL_INTERVAL)
         time.sleep(POLL_INTERVAL)
