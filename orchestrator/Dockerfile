@@ -27,7 +27,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copier tous les modules Python de l'orchestrateur
-COPY state.py services.py facturx_utils.py nodes.py graph.py main.py ./
+COPY state.py services.py facturx_utils.py schemas.py nodes.py graph.py main.py ./
 
 # CKV_DOCKER_3 : créer un utilisateur non-root pour limiter la surface d'attaque
 RUN useradd -r -u 1001 -s /sbin/nologin appuser

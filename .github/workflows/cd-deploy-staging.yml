@@ -1,37 +1,176 @@
-name: cd-deploy-staging
+name: CD – Deploy Staging (artifact-driven)
 
+# ─── Déclenchement ────────────────────────────────────────────────────────────
+# Ce workflow s'exécute APRÈS cd-docker-publish.yml (même déclencheur `push: main`).
+# GitHub Actions lance les deux workflows indépendamment ; l'image est disponible
+# sur GHCR dès que cd-docker-publish est terminé.
+# Pour un enchaînement strict CI → CD, voir commentaire `workflow_run` en bas.
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
-# CKV2_GHA_1 : permissions minimales — ce job n'écrit pas dans le dépôt
+# ─── Permissions minimales ────────────────────────────────────────────────────
+# contents: read  → checkout du code (récupère docker-compose.yml à jour)
+# packages: read  → authentification GHCR pour `docker compose pull`
 permissions:
   contents: read
+  packages: read
 
 jobs:
   deploy:
+    name: Deploy – Staging (self-hosted)
     runs-on: self-hosted
+
+    # Répertoire de déploiement permanent sur le serveur
+    env:
+      DEPLOY_DIR: /opt/facturx-staging
+
     steps:
+
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      # Récupère le docker-compose.yml du commit déclencheur pour synchronisation.
       - name: Checkout
         uses: actions/checkout@v4.2.2
 
+      # ── 2. Calcul du SHA court et de la référence image ─────────────────────
+      # SHA_SHORT = les 7 premiers caractères du SHA du commit déclencheur.
+      # Ce tag est EXACTEMENT celui utilisé par cd-docker-publish.yml pour pousser
+      # l'image sur GHCR → garantit que staging tire le bon artefact CI.
+      - name: Compute SHA_SHORT and IMAGE_BASE
+        run: |
+          echo "SHA_SHORT=$(git rev-parse --short ${{ github.sha }})" >> "$GITHUB_ENV"
+          # Mise en minuscules : GHCR exige des noms d'image entièrement en minuscules
+          REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_BASE=ghcr.io/${REPO_LC}/orchestrator" >> "$GITHUB_ENV"
+
+      # ── 3. Vérification Docker ───────────────────────────────────────────────
       - name: Pre-check Docker
         run: |
           docker --version
-          docker compose version || true
+          docker compose version
 
-      - name: Deploy staging (docker compose)
-        working-directory: /opt/facturx-staging
+      # ── 4. Login GHCR ────────────────────────────────────────────────────────
+      # Nécessaire pour `docker compose pull` sur un registre privé GHCR.
+      # GITHUB_TOKEN avec packages:read suffit — aucun secret supplémentaire requis.
+      - name: Login to GHCR
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 5. Synchronisation du docker-compose.yml ────────────────────────────
+      # Copie le compose file du checkout vers le répertoire de déploiement.
+      # Garantit que la configuration est toujours en phase avec le dépôt.
+      - name: Sync docker-compose.yml to staging
+        run: cp docker-compose.yml "$DEPLOY_DIR/docker-compose.yml"
+
+      # ── 6. Sauvegarde du tag précédent (référence rollback) ─────────────────
+      # Lit IMAGE_TAG AVANT de le modifier → utilisé par l'étape rollback (étape 11).
+      - name: Save previous IMAGE_TAG (rollback reference)
+        id: prev
         run: |
-          docker compose pull
-          docker compose up -d
+          ENV_FILE="$DEPLOY_DIR/.env"
+          PREV=$(grep '^IMAGE_TAG=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "none")
+          echo "tag=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Tag précédent (rollback disponible) : ${PREV:-aucun}"
+
+      # ── 7. Injection du nouveau IMAGE_TAG dans .env ──────────────────────────
+      # Crée ou met à jour IMAGE_TAG dans /opt/facturx-staging/.env.
+      #
+      # Structure du .env à initialiser une seule fois manuellement :
+      #   GEMINI_API_KEY=sk-...
+      #   DRIVE_FOLDER_ID=1Abc...
+      #   DRIVE_MATRIX_FILE_ID=1Xyz...
+      #   POLL_INTERVAL=900
+      #   IMAGE_TAG=              ← géré automatiquement par ce workflow
+      - name: Update IMAGE_TAG in staging .env
+        run: |
+          ENV_FILE="$DEPLOY_DIR/.env"
+          if grep -q '^IMAGE_TAG=' "$ENV_FILE" 2>/dev/null; then
+            # Mise à jour de la ligne existante (sed in-place)
+            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ env.SHA_SHORT }}|" "$ENV_FILE"
+          else
+            # Première injection (fichier .env existe mais IMAGE_TAG absent)
+            echo "IMAGE_TAG=${{ env.SHA_SHORT }}" >> "$ENV_FILE"
+          fi
+          echo "IMAGE_TAG mis à jour → ${{ env.SHA_SHORT }}"
+          echo "Image cible : ${{ env.IMAGE_BASE }}:${{ env.SHA_SHORT }}"
+
+      # ── 8. Pull de l'image depuis GHCR ───────────────────────────────────────
+      # docker compose pull lit IMAGE_TAG depuis .env et tire l'image exacte.
+      # Échoue explicitement si l'image n'existe pas sur GHCR (build CI raté).
+      - name: Pull image from GHCR
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose pull
+
+      # ── 9. Déploiement ────────────────────────────────────────────────────────
+      - name: Deploy (docker compose up -d)
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose up -d
+
+      # ── 10. Vérification de l'image réellement déployée ──────────────────────
+      # Affiche l'image exacte (registre:tag) lue depuis le container en cours.
+      # Confirmation que le bon artefact CI est en production.
+      - name: Verify deployed image
+        run: |
+          DEPLOYED=$(docker inspect --format='{{.Config.Image}}' orchestrator 2>/dev/null || echo "unknown")
+          echo "Image déployée : $DEPLOYED"
           docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
 
-      - name: Health check (container status)
-        # L'orchestrateur n'expose pas de port HTTP — on vérifie via Docker health
+      # ── 11. Health check ──────────────────────────────────────────────────────
+      # Attend 10s puis vérifie le statut Docker health (basé sur le heartbeat).
+      # UNHEALTHY → logs + exit 1 → déclenche l'étape rollback (if: failure()).
+      - name: Health check
+        id: healthcheck
         run: |
-          sleep 5
+          echo "Attente démarrage container (10s)..."
+          sleep 10
           STATUS=$(docker inspect --format='{{.State.Health.Status}}' orchestrator 2>/dev/null || echo "unknown")
-          echo "Container health: $STATUS"
-          docker ps --filter "name=orchestrator" --format "table {{.Names}}\t{{.Status}}"
+          echo "Container health : $STATUS"
+          docker ps --filter "name=orchestrator" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+          if [ "$STATUS" = "unhealthy" ]; then
+            echo "::error::Container unhealthy après déploiement — rollback en cours"
+            docker logs --tail 50 orchestrator
+            exit 1
+          fi
+
+      # ── 12. ROLLBACK AUTOMATIQUE (si health check échoue) ────────────────────
+      # Déclenché uniquement si une étape précédente a échoué ET qu'un tag
+      # précédent existe (pas le premier déploiement).
+      #
+      # Principe :
+      #   1. Restaurer l'ancien IMAGE_TAG dans .env (sauvegardé à l'étape 6)
+      #   2. Re-pull l'ancienne image (souvent en cache local → quasi-instantané)
+      #   3. Relancer docker compose up -d avec l'ancienne image
+      #
+      # Résultat : le container revient à la dernière version stable connue.
+      # L'étape reste visible dans le log avec le statut ::warning:: pour audit.
+      - name: Rollback to previous image
+        if: failure() && steps.prev.outputs.tag != 'none'
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          PREV_TAG="${{ steps.prev.outputs.tag }}"
+          echo "::warning::ROLLBACK automatique → restauration du tag : $PREV_TAG"
+          sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${PREV_TAG}|" .env
+          docker compose pull
+          docker compose up -d
+          echo "Rollback terminé — container restauré sur : ${{ env.IMAGE_BASE }}:${PREV_TAG}"
+          docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+
+# ─── NOTE : enchaînement strict CI → CD (optionnel) ──────────────────────────
+# Pour garantir que le CD ne démarre qu'une fois l'image CI effectivement
+# disponible sur GHCR, remplacer le déclencheur `push: main` par :
+#
+# on:
+#   workflow_run:
+#     workflows: ["CD - Build & Push Docker (GHCR)"]
+#     types: [completed]
+#     branches: ["main"]
+#
+# Et ajouter en début de job :
+#   if: ${{ github.event.workflow_run.conclusion == 'success' }}
+#
+# Avantage : déploiement impossible si le build CI a échoué.
+# Inconvénient : workflow_dispatch indépendant ne déclenche plus le CD directement.

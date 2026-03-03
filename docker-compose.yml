@@ -6,9 +6,20 @@
 # Avant : orchestrateur (LangGraph) + facturx-service (Flask HTTP)
 # Après : orchestrateur LangGraph pur (9 nœuds, 0 appel HTTP interne)
 #
-# Démarrage  : docker compose up -d --build
-# Logs       : docker compose logs -f
-# Arrêt      : docker compose down
+# ── Modes de lancement ───────────────────────────────────────────────────────
+#
+# Staging / CI (artifact-driven) :
+#   IMAGE_TAG est injecté dans .env par cd-deploy-staging.yml (SHA court).
+#   docker compose pull && docker compose up -d
+#   → tire l'image précise depuis GHCR, n'effectue aucun build local.
+#
+# Développement local :
+#   IMAGE_TAG absent (ou =local) → le fallback ":local" est utilisé.
+#   docker compose up --build
+#   → build local via build: ci-dessous, tag ":local" appliqué.
+#
+# Logs  : docker compose logs -f
+# Arrêt : docker compose down
 
 services:
   # ─────────────────────────────────────────────────────────────────────────
@@ -16,6 +27,12 @@ services:
   #   Workflow : poll Gmail → OCR → Gemini → XML EN16931 → PDF/A-3 → Drive
   # ─────────────────────────────────────────────────────────────────────────
   orchestrator:
+    # Staging : image poussée par la CI (cd-docker-publish.yml) sur GHCR.
+    # IMAGE_TAG = SHA court (ex: a1b2c3d), mis à jour par cd-deploy-staging.yml.
+    # Dev local : fallback ":local" — construite par `docker compose up --build`.
+    image: ghcr.io/tonygloaguen/factur-x-project/orchestrator:${IMAGE_TAG:-local}
+    # build: conservé pour le développement local (`docker compose up --build`).
+    # En staging, `docker compose pull` ignore le build et tire l'image GHCR.
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
