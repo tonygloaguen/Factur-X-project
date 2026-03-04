@@ -12,20 +12,27 @@ FROM python:3.12.9-slim
 #   tesseract-ocr-deu : langue allemande (factures DE/CH/AT)
 #   tesseract-ocr-eng : langue anglaise (fallback + noms techniques)
 # Ghostscript : requis par certains traitements PDF (lib factur-x)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-fra \
     tesseract-ocr-deu \
     tesseract-ocr-eng \
     ghostscript \
-    && rm -rf /var/lib/apt/lists/*
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Installer les dépendances Python en premier (meilleure mise en cache Docker)
 COPY requirements.txt .
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && python -m pip install --no-cache-dir -r requirements.txt
 
 # Copier tous les modules Python de l'orchestrateur
 COPY state.py services.py facturx_utils.py schemas.py nodes.py graph.py main.py ./
@@ -45,9 +52,6 @@ from pathlib import Path; \
 p = Path('/tmp/heartbeat'); \
 sys.exit(0 if p.exists() and (time.time() - float(p.read_text())) < 1800 else 1)" \
     || exit 1
-
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-ENV PIP_NO_CACHE_DIR=1
 
 # L'orchestrateur tourne en continu (boucle de polling toutes les N secondes)
 # -u : unbuffered stdout/stderr pour voir les logs en temps réel
