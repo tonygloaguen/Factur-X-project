@@ -46,6 +46,9 @@ p = Path('/tmp/heartbeat'); \
 sys.exit(0 if p.exists() and (time.time() - float(p.read_text())) < 1800 else 1)" \
     || exit 1
 
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
+
 # L'orchestrateur tourne en continu (boucle de polling toutes les N secondes)
 # -u : unbuffered stdout/stderr pour voir les logs en temps réel
 CMD ["python", "-u", "main.py"]
