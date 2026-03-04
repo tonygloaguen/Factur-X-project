@@ -59,7 +59,8 @@ from datetime import datetime
 import requests
 from googleapiclient.http import MediaIoBaseUpload
 
-from schemas import GeminiInvoiceOutput
+from pydantic import ValidationError
+from schemas import GeminiInvoiceOutput, InvoiceExtracted
 from state import InvoiceState
 from services import GoogleServices, StateDB
 from facturx_utils import (
@@ -187,6 +188,28 @@ def node_filter_document(state: InvoiceState) -> dict:
 # Nœud 3 : call_gemini — Extraction IA structurée EN16931
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _validate_invoice_strict(invoice_data: dict) -> list[str]:
+    """Valide strictement les champs clés d'une facture extraite par Gemini.
+
+    Construit un ``InvoiceExtracted`` depuis ``invoice_data`` et capture
+    toutes les erreurs Pydantic en une liste de messages lisibles.
+
+    Args:
+        invoice_data: Dict brut après coercition ``GeminiInvoiceOutput``.
+
+    Returns:
+        Liste vide si valide, liste de messages d'erreur sinon.
+    """
+    try:
+        InvoiceExtracted.from_invoice_data(invoice_data)
+        return []
+    except ValidationError as exc:
+        return [
+            f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}"
+            for err in exc.errors()
+        ]
+
+
 def node_call_gemini(state: InvoiceState) -> dict:
     """
     Appelle Gemini pour extraire les données structurées de la facture.
@@ -223,6 +246,20 @@ def node_call_gemini(state: InvoiceState) -> dict:
                 "invoice_data": invoice_data,
                 "gemini_used": True,
                 "processing_error": "not_invoice_gemini:est_facture=false",
+            }
+
+        # Validation STRICTE : champs obligatoires + cohérence métier
+        # (après la coercition permissive GeminiInvoiceOutput ci-dessus)
+        validation_errors = _validate_invoice_strict(invoice_data)
+        if validation_errors:
+            fields_str = "; ".join(validation_errors)
+            logger.warning(
+                "Validation stricte KO — révision manuelle requise : %s", fields_str
+            )
+            return {
+                "invoice_data": invoice_data,
+                "gemini_used": True,
+                "processing_error": f"validation_ko:{fields_str}",
             }
 
         logger.info(
@@ -756,6 +793,41 @@ def node_log_result(state: InvoiceState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Nœud manual_review — Révision manuelle des factures rejetées par validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_manual_review(state: InvoiceState) -> dict:
+    """Nœud déclenché quand la validation stricte ``InvoiceExtracted`` échoue.
+
+    Ce nœud est "best-effort" : il logge les anomalies de façon structurée
+    pour permettre une intervention humaine, puis laisse ``log_result``
+    écrire le statut ``error`` dans SQLite.
+
+    Aucune écriture sur Drive ni label Gmail n'est effectuée (guard clauses
+    dans les nœuds aval bloquent tout traitement si ``processing_error`` est positionné).
+
+    Le message d'email N'EST PAS labellisé ``Factures-Traitées`` : il pourra
+    donc être retraité manuellement ou après correction des données sources.
+    """
+    err = state.get("processing_error", "")
+    inv = state.get("invoice_data") or {}
+    vendeur = inv.get("vendeur") or {}
+
+    logger.warning(
+        "╔══ RÉVISION MANUELLE REQUISE ══════════════════════════════════════╗"
+    )
+    logger.warning("║  Email      : %s", state.get("message_id", "?"))
+    logger.warning("║  Fournisseur: %s", vendeur.get("nom_court") or vendeur.get("nom") or "?")
+    logger.warning("║  Numéro     : %s", inv.get("numero_facture") or "?")
+    logger.warning("║  TTC        : %s€", inv.get("montant_ttc") or "?")
+    logger.warning("║  Erreurs    : %s", err.removeprefix("validation_ko:"))
+    logger.warning(
+        "╚═══════════════════════════════════════════════════════════════════╝"
+    )
+    return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Routeurs — Fonctions de décision pour les arêtes conditionnelles
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -785,5 +857,15 @@ def route_after_gemini(state: InvoiceState) -> str:
 
     Note : les deux cas d'erreur (not_invoice et rate_limit) sont gérés
     différemment dans log_result (l'un marque SQLite, l'autre non).
+
+    Cas supplémentaire : si la validation stricte ``InvoiceExtracted`` a échoué
+    (``processing_error`` commence par ``"validation_ko:"``), on route vers
+    ``manual_review`` au lieu de ``log_result`` directement, afin de loguer
+    les champs en erreur de façon structurée avant la persistence SQLite.
     """
-    return "log_result" if state.get("processing_error") else "normalize_data"
+    err = state.get("processing_error", "")
+    if not err:
+        return "normalize_data"
+    if err.startswith("validation_ko:"):
+        return "manual_review"
+    return "log_result"
