@@ -10,6 +10,14 @@ on:
   push:
     branches: ["main"]
 
+# ─── Concurrence ──────────────────────────────────────────────────────────────
+# Un seul déploiement staging à la fois. Si un nouveau push arrive pendant qu'un
+# déploiement est en attente (runner offline) ou en cours, l'ancien est annulé.
+# Cela évite la queue de 24h et garantit que seul le dernier commit est déployé.
+concurrency:
+  group: cd-staging
+  cancel-in-progress: true
+
 # ─── Permissions minimales ────────────────────────────────────────────────────
 # contents: read  → checkout du code (récupère docker-compose.yml à jour)
 # packages: read  → authentification GHCR pour `docker compose pull`
@@ -21,6 +29,7 @@ jobs:
   deploy:
     name: Deploy – Staging (self-hosted)
     runs-on: self-hosted
+    timeout-minutes: 15  # Fail rapide si le runner est offline → pas de blocage 24h
 
     # Répertoire de déploiement permanent sur le serveur
     env:
