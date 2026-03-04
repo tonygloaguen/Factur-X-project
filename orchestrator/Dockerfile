@@ -24,7 +24,8 @@ WORKDIR /app
 
 # Installer les dépendances Python en premier (meilleure mise en cache Docker)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
 # Copier tous les modules Python de l'orchestrateur
 COPY state.py services.py facturx_utils.py schemas.py nodes.py graph.py main.py ./
