@@ -84,6 +84,7 @@ from nodes import (
     node_update_matrix,
     node_label_gmail,
     node_log_result,
+    node_manual_review,
     route_after_filter,
     route_after_gemini,
 )
@@ -116,6 +117,7 @@ def build_graph():
     g.add_node("update_matrix",   node_update_matrix)
     g.add_node("label_gmail",     node_label_gmail)
     g.add_node("log_result",      node_log_result)
+    g.add_node("manual_review",   node_manual_review)
 
     # ── Point d'entrée ───────────────────────────────────────────────────────
     g.set_entry_point("extract_text")
@@ -144,12 +146,19 @@ def build_graph():
     # un rate limit 429, on saute la génération XML (inutile ou impossible).
     g.add_conditional_edges(
         "call_gemini",
-        route_after_gemini,           # Routeur : retourne "normalize_data" ou "log_result"
+        route_after_gemini,
         {
             "normalize_data": "normalize_data",
+            "manual_review":  "manual_review",   # validation_ko → log structuré
             "log_result":     "log_result",
         },
     )
+
+    # ── Arête directe : manual_review → log_result ───────────────────────────
+    # Après avoir loggué les erreurs de validation, on passe toujours par
+    # log_result pour persister le statut "error" dans SQLite (processing_error
+    # est positionné → log_result écrit le bon statut sans écraser Drive/Gmail).
+    g.add_edge("manual_review", "log_result")
 
     # ── Arêtes directes : happy path de génération Factur-X ─────────────────
     # Ces nœuds ont chacun une guard clause interne (if processing_error: return {})
