@@ -2,29 +2,41 @@
 conftest.py — Configuration pytest partagée pour le projet Factur-X
 =====================================================================
 
-Fournit :
-  - Stubs des dépendances lourdes absentes en env CI/test léger
-    (googleapiclient, langgraph, lxml, fitz, facturx…)
-  - Cela permet d'importer nodes.py / facturx_utils.py dans les tests
-    sans avoir installé toutes les dépendances de production.
+Fournit des stubs des dépendances lourdes absentes en env CI/test léger
+(googleapiclient, langgraph, lxml, fitz, facturx…).
+
+Cela permet d'importer nodes.py / facturx_utils.py dans les tests unitaires
+sans avoir installé toutes les dépendances de production.
+
+Règle de sécurité : un module n'est stubifié QUE s'il est introuvable
+(ImportError). Si le paquet est réellement installé, il est utilisé tel quel.
+Cela évite d'écraser les vraies bibliothèques dans les tests d'intégration
+(ex : test_facturx_en16931.py qui utilise la vraie lib facturx).
 """
 from __future__ import annotations
 
+import importlib
 import sys
-from types import ModuleType
 from unittest.mock import MagicMock
 
 
-def _stub(name: str) -> MagicMock:
-    """Crée un MagicMock et l'enregistre dans sys.modules si absent."""
-    if name not in sys.modules:
-        mock = MagicMock()
-        sys.modules[name] = mock
-        return mock
-    return sys.modules[name]  # type: ignore[return-value]
+def _stub_if_missing(name: str) -> bool:
+    """Stubifie ``name`` dans sys.modules UNIQUEMENT s'il n'est pas importable.
+
+    Returns:
+        True si un stub a été injecté, False si le vrai module existe.
+    """
+    if name in sys.modules:
+        return False  # Déjà chargé (réel ou stub précédent)
+    try:
+        importlib.import_module(name)
+        return False  # Importable → on laisse le vrai module
+    except (ImportError, ModuleNotFoundError):
+        sys.modules[name] = MagicMock()
+        return True
 
 
-# ── Google API client (non installé en env test léger) ----------------------
+# ── Google API client --------------------------------------------------------
 for _pkg in (
     "googleapiclient",
     "googleapiclient.http",
@@ -38,30 +50,33 @@ for _pkg in (
     "google_auth_oauthlib",
     "google_auth_oauthlib.flow",
 ):
-    _stub(_pkg)
+    _stub_if_missing(_pkg)
 
-# MediaIoBaseUpload doit être un vrai attribut mockable
-import googleapiclient.http  # noqa: E402  (après stub)
-googleapiclient.http.MediaIoBaseUpload = MagicMock()
+# MediaIoBaseUpload : attribut indispensable pour l'import de nodes.py
+import googleapiclient.http  # noqa: E402
+if not hasattr(googleapiclient.http, "MediaIoBaseUpload") or isinstance(
+    googleapiclient.http.MediaIoBaseUpload, MagicMock
+):
+    googleapiclient.http.MediaIoBaseUpload = MagicMock()
 
-# ── LangGraph (non installé en env test léger) --------------------------------
+# ── LangGraph ----------------------------------------------------------------
 for _pkg in ("langgraph", "langgraph.graph"):
-    _stub(_pkg)
+    _stub_if_missing(_pkg)
 
-# StateGraph et END accessibles via mock
 import langgraph.graph  # noqa: E402
-langgraph.graph.StateGraph = MagicMock()
-langgraph.graph.END = "END"
+if isinstance(getattr(langgraph.graph, "StateGraph", None), MagicMock) or not hasattr(
+    langgraph.graph, "StateGraph"
+):
+    langgraph.graph.StateGraph = MagicMock()
+    langgraph.graph.END = "END"
 
-# ── Bibliothèques PDF/XML lourdes (présentes en prod, absentes en CI léger) ---
+# ── Bibliothèques PDF/XML lourdes --------------------------------------------
+# Stubifiées UNIQUEMENT si absentes — le test_facturx_en16931.py utilise
+# les vraies (fitz, lxml, facturx) quand elles sont installées en CI.
 for _pkg in (
     "fitz",
     "lxml",
     "lxml.etree",
     "facturx",
 ):
-    _stub(_pkg)
-
-# ── Requests est léger et généralement présent ; stub défensif seulement ----
-if "requests" not in sys.modules:
-    _stub("requests")
+    _stub_if_missing(_pkg)
