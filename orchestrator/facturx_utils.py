@@ -344,6 +344,25 @@ def clean_gemini_json(raw: str) -> str:
     return raw.strip()
 
 
+def _extract_response_text(response_data: dict) -> str:
+    """Extrait le texte de réponse JSON depuis une réponse Gemini.
+
+    Gemini 2.5-flash (mode thinking) renvoie les parts dans cet ordre :
+      parts[0] = {"thought": True,  "text": "...raisonnement interne..."}
+      parts[1] = {"thought": False, "text": "{...JSON facture...}"}
+
+    Le code doit ignorer les parts de thinking et prendre la dernière
+    part non-thought, qui contient la réponse JSON réelle.
+    Ce helper est une défense en profondeur : thinkingBudget=0 dans le
+    payload devrait déjà empêcher l'apparition de parts de thinking.
+    """
+    parts = response_data["candidates"][0]["content"]["parts"]
+    response_parts = [p for p in parts if not p.get("thought", False)]
+    # Si toutes les parts sont des thoughts (ne devrait pas arriver), fallback
+    target = response_parts[-1] if response_parts else parts[-1]
+    return target["text"]
+
+
 def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     """
     Appelle l'API Gemini pour extraire les données structurées d'une facture.
@@ -376,7 +395,11 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
             "temperature": 0.1,               # Déterministe (extraction, pas créatif)
             "responseMimeType": "application/json",
             "maxOutputTokens": 8192,          # 8192 évite les troncatures JSON sur factures denses
-                                              # (finishReason=MAX_TOKENS → "Unterminated string")
+            # Désactive le mode "thinking" de Gemini 2.5-flash :
+            #   - Le thinking consomme le budget maxOutputTokens → troncature JSON
+            #   - Il ajoute des parts {"thought": true} qui cassent l'extraction parts[0]
+            #   - L'extraction JSON structurée ne bénéficie pas du raisonnement interne
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
 
@@ -411,7 +434,7 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
             resp.raise_for_status()
 
         data = resp.json()
-        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        raw_text = _extract_response_text(data)
         break  # Réponse HTTP 200 obtenue
 
     else:
@@ -438,7 +461,7 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
                 logger.error("Erreur HTTP Gemini au retry JSON (%d)", resp2.status_code)
                 resp2.raise_for_status()
             data2 = resp2.json()
-            raw_text = data2["candidates"][0]["content"]["parts"][0]["text"]
+            raw_text = _extract_response_text(data2)
 
         cleaned = clean_gemini_json(raw_text)
         try:

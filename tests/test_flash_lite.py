@@ -137,6 +137,7 @@ def _build_payload(ocr_text: str) -> dict[str, Any]:
             "temperature": 0.1,
             "responseMimeType": "application/json",
             "maxOutputTokens": 8192,
+            "thinkingConfig": {"thinkingBudget": 0},  # désactive thinking (troncature + parts[0])
         },
     }
 
@@ -165,7 +166,10 @@ def _call_gemini_sync(
     resp.raise_for_status()
     body = resp.json()
 
-    raw_text: str = body["candidates"][0]["content"]["parts"][0]["text"]
+    # Filtre les parts "thought" (Gemini 2.5-flash thinking) — prend la dernière non-thought
+    _parts = body["candidates"][0]["content"]["parts"]
+    _resp_parts = [p for p in _parts if not p.get("thought", False)]
+    raw_text: str = (_resp_parts[-1] if _resp_parts else _parts[-1])["text"]
     usage: dict[str, int] = body.get("usageMetadata", {})
     input_tokens: int = usage.get("promptTokenCount", 0)
     output_tokens: int = usage.get("candidatesTokenCount", 0)
