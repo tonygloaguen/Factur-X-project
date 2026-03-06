@@ -136,7 +136,7 @@ def _build_payload(ocr_text: str) -> dict[str, Any]:
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json",
-            "maxOutputTokens": 4096,
+            "maxOutputTokens": 8192,
         },
     }
 

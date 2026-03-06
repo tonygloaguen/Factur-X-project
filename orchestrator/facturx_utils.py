@@ -375,7 +375,8 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
         "generationConfig": {
             "temperature": 0.1,               # Déterministe (extraction, pas créatif)
             "responseMimeType": "application/json",
-            "maxOutputTokens": 4096,          # Budget token explicite (évite les réponses runaway)
+            "maxOutputTokens": 8192,          # 8192 évite les troncatures JSON sur factures denses
+                                              # (finishReason=MAX_TOKENS → "Unterminated string")
         },
     }
 
