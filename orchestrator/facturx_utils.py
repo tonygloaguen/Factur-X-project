@@ -49,7 +49,11 @@ logger = logging.getLogger("orchestrator")
 # ─────────────────────────────────────────────────────────────────────────────
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# gemini-2.0-flash : modèle stable sans thinking mode (contrairement à 2.5-flash
+# qui active le thinking par défaut depuis mars 2025 → troncatures JSON).
+# Surcharger via GEMINI_MODEL=gemini-2.5-flash si on veut le modèle thinking
+# (avec thinkingBudget=0 dans le payload pour neutraliser le thinking).
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 # CKV_SEC_1 : la clé API est passée en header (x-goog-api-key) et NON dans l'URL
 # pour éviter qu'elle apparaisse dans les logs HTTP (access logs, proxies, HAR, etc.)
 GEMINI_BASE_URL = (
