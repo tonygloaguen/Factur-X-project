@@ -40,7 +40,7 @@ services:
     environment:
       # ── IA Gemini (requis) ───────────────────────────────────────────────
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
       # Profil Factur-X : DOIT être exactement "en16931" (minuscules)
       - FACTURX_PROFILE=${FACTURX_PROFILE:-en16931}
 
