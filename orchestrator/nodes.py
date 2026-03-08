@@ -82,6 +82,8 @@ logger = logging.getLogger("orchestrator")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 GMAIL_LABEL_NAME = os.environ.get("GMAIL_LABEL", "Factures-Traitées")
 DRIVE_MATRIX_FILE_ID = os.environ.get("DRIVE_MATRIX_FILE_ID", "")
+# Nom de l'onglet de la matrice (laisser vide = premier onglet)
+DRIVE_MATRIX_SHEET_NAME = os.environ.get("DRIVE_MATRIX_SHEET_NAME", "")
 # Google Sheet de suivi linéaire des factures traitées (Suivi_Transmission_Factures_Comptable_MAJ)
 # Colonnes : Date | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut
 DRIVE_TRACKING_SHEET_ID = os.environ.get("DRIVE_TRACKING_SHEET_ID", "")
@@ -537,25 +539,36 @@ def node_update_matrix(state: InvoiceState) -> dict:
 
     try:
         # Lire toute la feuille (colonnes A à Z suffisent, ~15 colonnes max)
+        sheet_range = f"{DRIVE_MATRIX_SHEET_NAME}!A:Z" if DRIVE_MATRIX_SHEET_NAME else "A:Z"
         result = services.sheets.spreadsheets().values().get(
             spreadsheetId=DRIVE_MATRIX_FILE_ID,
-            range="A:Z",
+            range=sheet_range,
         ).execute()
         rows = result.get("values", [])
 
         if not rows:
-            logger.warning("[ 8/10] update_matrix : feuille vide")
+            logger.warning("[ 8/10] update_matrix : feuille vide (onglet='%s')", DRIVE_MATRIX_SHEET_NAME or "premier onglet")
             return {}
 
         # Trouver la colonne du mois dans la ligne d'en-tête (ligne 0)
         header = rows[0]
         month_norm = _norm(month_label)
+        logger.info("[ 8/10] update_matrix : en-têtes trouvés = %s", header)
+        # Correspondance exacte d'abord, puis partielle (ex: "mars" contenu dans "mars 2026")
         col_idx = next(
             (i for i, h in enumerate(header) if _norm(h) == month_norm),
             None,
         )
         if col_idx is None:
-            logger.warning("[ 8/10] update_matrix : colonne '%s' introuvable dans la matrice", month_label)
+            col_idx = next(
+                (i for i, h in enumerate(header) if month_norm in _norm(h) or _norm(h) in month_norm),
+                None,
+            )
+        if col_idx is None:
+            logger.warning(
+                "[ 8/10] update_matrix : colonne '%s' introuvable — en-têtes disponibles : %s",
+                month_label, header,
+            )
             return {}
 
         # Trouver la ligne : col A = client (acheteur), col B = fournisseur (vendeur)
@@ -576,9 +589,11 @@ def node_update_matrix(state: InvoiceState) -> dict:
                 break
 
         if row_idx is None:
+            sample = [(r[0] if len(r) > 0 else "", r[1] if len(r) > 1 else "") for r in rows[1:6]]
             logger.warning(
-                "[ 8/10] update_matrix : aucune ligne pour fournisseur='%s' / client='%s'",
-                vendor_name, buyer_name,
+                "[ 8/10] update_matrix : aucune ligne pour fournisseur='%s' / client='%s' — "
+                "5 premières lignes (col A, col B) : %s",
+                vendor_name, buyer_name, sample,
             )
             return {}
 
