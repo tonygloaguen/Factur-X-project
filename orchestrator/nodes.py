@@ -513,6 +513,7 @@ def node_update_matrix(state: InvoiceState) -> dict:
     if state.get("processing_error"):
         return {}
     if not DRIVE_MATRIX_FILE_ID:
+        logger.warning("[ 8/10] update_matrix : DRIVE_MATRIX_FILE_ID non configuré — mise à jour matrice désactivée")
         return {}
 
     inv = state.get("invoice_data", {})
