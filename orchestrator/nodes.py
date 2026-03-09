@@ -72,6 +72,7 @@ from facturx_utils import (
     embed_facturx_in_pdf,
     build_filename,
     build_folder_name,
+    build_supplier_folder_name,
     GeminiJsonDecodeError,
     MAX_PDF_SIZE_FOR_INVOICE,
 )
@@ -420,11 +421,38 @@ def node_embed_facturx(state: InvoiceState) -> dict:
 # Nœud 7 : upload_drive — Upload sur Google Drive
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _get_or_create_drive_folder(services: GoogleServices, name: str, parent_id: str) -> str:
+    """Cherche ou crée un dossier Drive par nom sous un parent donné. Retourne l'ID."""
+    query = (
+        f"name = '{name}' "
+        f"and '{parent_id}' in parents "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    results = (
+        services.drive.files()
+        .list(q=query, spaces="drive", fields="files(id, name)")
+        .execute()
+    )
+    folders = results.get("files", [])
+    if folders:
+        return folders[0]["id"]
+    folder_meta = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    folder = services.drive.files().create(body=folder_meta, fields="id").execute()
+    logger.info("Dossier Drive créé : '%s' (ID: %s)", name, folder["id"])
+    return folder["id"]
+
+
 def node_upload_drive(state: InvoiceState) -> dict:
     """
-    Upload le PDF Factur-X sur Google Drive dans le sous-dossier mensuel.
+    Upload le PDF Factur-X sur Google Drive dans la hiérarchie :
+      ROOT / YYYY-MM Mois / Fournisseur / fichier.pdf
 
-    Le sous-dossier (ex: "2026-02 Février") est créé à la volée si absent.
+    Les sous-dossiers mensuel et fournisseur sont créés à la volée si absents.
     Retourne l'ID Drive et le lien partageable pour l'audit SQLite.
 
     Produit : drive_file_id, drive_file_url
@@ -437,41 +465,26 @@ def node_upload_drive(state: InvoiceState) -> dict:
         return {"processing_error": "drive_folder_id_manquant"}
 
     services: GoogleServices = state["services"]
-    folder_name = state["invoice_folder"]
+    month_folder_name = state["invoice_folder"]
+    supplier_folder_name = build_supplier_folder_name(state.get("invoice_data", {}))
     filename = state["invoice_filename"]
 
-    logger.info("[ 7/9 ] upload_drive : upload '%s' → '%s'...", filename, folder_name)
+    logger.info(
+        "[ 7/9 ] upload_drive : upload '%s' → '%s/%s'...",
+        filename, month_folder_name, supplier_folder_name,
+    )
 
     try:
-        # Chercher ou créer le sous-dossier mensuel
-        query = (
-            f"name = '{folder_name}' "
-            f"and '{DRIVE_FOLDER_ID}' in parents "
-            f"and mimeType = 'application/vnd.google-apps.folder' "
-            f"and trashed = false"
-        )
-        results = (
-            services.drive.files()
-            .list(q=query, spaces="drive", fields="files(id, name)")
-            .execute()
-        )
-        folders = results.get("files", [])
+        # Niveau 1 : sous-dossier mensuel (ex : "2026-03 Mars")
+        month_id = _get_or_create_drive_folder(services, month_folder_name, DRIVE_FOLDER_ID)
+        logger.info("Dossier mensuel : '%s'", month_folder_name)
 
-        if folders:
-            subfolder_id = folders[0]["id"]
-            logger.info("Dossier Drive existant : '%s'", folder_name)
-        else:
-            folder_meta = {
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [DRIVE_FOLDER_ID],
-            }
-            folder = services.drive.files().create(body=folder_meta, fields="id").execute()
-            subfolder_id = folder["id"]
-            logger.info("Dossier Drive créé : '%s' (ID: %s)", folder_name, subfolder_id)
+        # Niveau 2 : sous-dossier fournisseur (ex : "IPSO", "GPDIS")
+        supplier_id = _get_or_create_drive_folder(services, supplier_folder_name, month_id)
+        logger.info("Dossier fournisseur : '%s'", supplier_folder_name)
 
-        # Uploader le fichier
-        file_meta = {"name": filename, "parents": [subfolder_id]}
+        # Upload du fichier dans le dossier fournisseur
+        file_meta = {"name": filename, "parents": [supplier_id]}
         media = MediaIoBaseUpload(
             io.BytesIO(state["facturx_pdf"]),
             mimetype="application/pdf",
