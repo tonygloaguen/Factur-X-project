@@ -53,11 +53,19 @@ jobs:
           REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_BASE=ghcr.io/${REPO_LC}/orchestrator" >> "$GITHUB_ENV"
 
-      # ── 3. Vérification Docker ───────────────────────────────────────────────
-      - name: Pre-check Docker
+      # ── 3. Vérification pré-déploiement ─────────────────────────────────────
+      - name: Pre-check Docker and DEPLOY_DIR
         run: |
           docker --version
           docker compose version
+          if [ ! -d "$DEPLOY_DIR" ]; then
+            echo "::error::Répertoire de déploiement '$DEPLOY_DIR' introuvable. Créer le répertoire et initialiser le .env manuellement."
+            exit 1
+          fi
+          if [ ! -f "$DEPLOY_DIR/.env" ]; then
+            echo "::error::Fichier '$DEPLOY_DIR/.env' manquant. Initialiser le .env manuellement avant le premier déploiement."
+            exit 1
+          fi
 
       # ── 4. Login GHCR ────────────────────────────────────────────────────────
       # Nécessaire pour `docker compose pull` sur un registre privé GHCR.
@@ -76,13 +84,13 @@ jobs:
         run: cp docker-compose.yml "$DEPLOY_DIR/docker-compose.yml"
 
       # ── 6. Sauvegarde du tag précédent (référence rollback) ─────────────────
-      # Lit IMAGE_TAG AVANT de le modifier → utilisé par l'étape rollback (étape 11).
+      # Lit IMAGE_TAG AVANT de le modifier → utilisé par l'étape rollback (étape 12).
       - name: Save previous IMAGE_TAG (rollback reference)
         id: prev
         run: |
           ENV_FILE="$DEPLOY_DIR/.env"
           PREV=$(grep '^IMAGE_TAG=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "none")
-          echo "tag=$PREV" >> "$GITHUB_OUTPUT"
+          echo "tag=${PREV:-none}" >> "$GITHUB_OUTPUT"
           echo "Tag précédent (rollback disponible) : ${PREV:-aucun}"
 
       # ── 7. Injection du nouveau IMAGE_TAG dans .env ──────────────────────────
@@ -95,6 +103,7 @@ jobs:
       #   POLL_INTERVAL=900
       #   IMAGE_TAG=              ← géré automatiquement par ce workflow
       - name: Update IMAGE_TAG in staging .env
+        id: update_env
         run: |
           ENV_FILE="$DEPLOY_DIR/.env"
           if grep -q '^IMAGE_TAG=' "$ENV_FILE" 2>/dev/null; then
@@ -116,6 +125,7 @@ jobs:
 
       # ── 9. Déploiement ────────────────────────────────────────────────────────
       - name: Deploy (docker compose up -d)
+        id: deploy
         working-directory: ${{ env.DEPLOY_DIR }}
         run: docker compose up -d
 
@@ -145,9 +155,14 @@ jobs:
             exit 1
           fi
 
-      # ── 12. ROLLBACK AUTOMATIQUE (si health check échoue) ────────────────────
-      # Déclenché uniquement si une étape précédente a échoué ET qu'un tag
-      # précédent existe (pas le premier déploiement).
+      # ── 12. ROLLBACK AUTOMATIQUE (si deploy ou health check échoue) ──────────
+      # Déclenché uniquement si une étape post-mise à jour .env a échoué ET qu'un
+      # tag précédent existe (pas le premier déploiement).
+      #
+      # Condition : failure() est limité aux étapes 8-11 car les étapes 1-6 échouent
+      # avant que le .env soit modifié → le container en cours n'est pas impacté.
+      # On vérifie steps.update_env.conclusion pour ne rollbacker que si on a effectivement
+      # changé le .env (sinon l'ancienne version est déjà en place).
       #
       # Principe :
       #   1. Restaurer l'ancien IMAGE_TAG dans .env (sauvegardé à l'étape 6)
@@ -155,9 +170,12 @@ jobs:
       #   3. Relancer docker compose up -d avec l'ancienne image
       #
       # Résultat : le container revient à la dernière version stable connue.
-      # L'étape reste visible dans le log avec le statut ::warning:: pour audit.
       - name: Rollback to previous image
-        if: failure() && steps.prev.outputs.tag != 'none'
+        if: |
+          failure() &&
+          steps.update_env.conclusion == 'success' &&
+          steps.prev.outputs.tag != 'none' &&
+          steps.prev.outputs.tag != ''
         working-directory: ${{ env.DEPLOY_DIR }}
         run: |
           PREV_TAG="${{ steps.prev.outputs.tag }}"

@@ -50,6 +50,8 @@ services:
       # ID Google Sheets de la matrice de suivi fournisseurs (croisé fournisseur × mois)
       # (Suivi_Transmission_Factures_Comptable.xlsx)
       - DRIVE_MATRIX_FILE_ID=${DRIVE_MATRIX_FILE_ID:-1drSsQQVtgniDLg5vHK2jTTadP3EYgm-b}
+      # Nom de l'onglet contenant la matrice (laisser vide = premier onglet)
+      - DRIVE_MATRIX_SHEET_NAME=${DRIVE_MATRIX_SHEET_NAME:-}
       # ID Google Sheets du suivi linéaire des factures traitées (une ligne par facture)
       # (Suivi_Transmission_Factures_Comptable_MAJ.xlsx converti en Google Sheet)
       # Colonnes A→H : Date | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut

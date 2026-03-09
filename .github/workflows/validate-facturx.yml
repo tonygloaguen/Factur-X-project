@@ -24,6 +24,7 @@ jobs:
   validate:
     name: Validate – Tests unitaires & EN16931
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -65,6 +66,7 @@ jobs:
     name: Gitleaks – détection de secrets
     runs-on: ubuntu-24.04
     needs: validate
+    timeout-minutes: 10
 
     steps:
       - name: Checkout (historique complet)
@@ -73,7 +75,8 @@ jobs:
           fetch-depth: 0          # historique entier requis pour un scan exhaustif
 
       - name: Gitleaks – scan secrets (bloquant)
-        # CKV_GHA_1 : à pinner sur un SHA complet lors du passage au SHA pinning global
+        # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
+        # Exemple : gitleaks/gitleaks-action@<sha256>
         # Repo public → GITHUB_TOKEN suffit ; repo privé → ajouter GITLEAKS_LICENSE secret
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -86,6 +89,7 @@ jobs:
     name: Trivy – scan CVE (Dockerfile + dépendances)
     runs-on: ubuntu-24.04
     needs: validate
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -94,6 +98,7 @@ jobs:
       # Scan de configuration du Dockerfile (USER non-root, HEALTHCHECK, etc.)
       # exit-code: "1" → bloquant sur toute misconfiguration détectée
       - name: Trivy – scan Dockerfile (config)
+        # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
         uses: aquasecurity/trivy-action@0.29.0
         with:
           scan-type: config
@@ -103,6 +108,7 @@ jobs:
 
       # Scan CVE + secrets dans le filesystem Python — bloquant CRITICAL et HIGH uniquement
       - name: Trivy – scan filesystem (dépendances Python)
+        # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
         uses: aquasecurity/trivy-action@0.29.0
         with:
           scan-type: fs
@@ -119,6 +125,7 @@ jobs:
     name: Checkov – audit Dockerfile et workflow
     runs-on: ubuntu-24.04
     needs: validate
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -127,6 +134,7 @@ jobs:
       # Audit Dockerfile – bloquant
       # CKV_DOCKER_2 (HEALTHCHECK) et CKV_DOCKER_3 (USER non-root) sont couverts dans le Dockerfile
       - name: Checkov – audit Dockerfile
+        # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: orchestrator/
@@ -137,6 +145,7 @@ jobs:
       # CKV_GHA_1 (SHA pinning des actions) est skipé temporairement :
       # nécessite un outillage dédié (Renovate/Dependabot) — à traiter séparément
       - name: Checkov – audit GitHub Actions
+        # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .github/workflows/
