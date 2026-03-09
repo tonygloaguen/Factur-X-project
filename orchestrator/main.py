@@ -89,15 +89,23 @@ def _extract_body(payload: dict) -> str:
 def _find_pdf_attachments(
     payload: dict, message_id: str, services: GoogleServices
 ) -> list[tuple[str, bytes]]:
-    """Retourne la liste des (nom_fichier, contenu_bytes) pour les PJ PDF."""
+    """Retourne la liste des (nom_fichier, contenu_bytes) pour les PJ PDF.
+
+    Gère trois cas :
+      1. Attachement classique : body.attachmentId → récupéré via l'API Gmail
+      2. Données inline : body.data sans attachmentId (PDFs embarqués directement)
+      3. Parties imbriquées : multipart/* ou message/rfc822 (emails transférés)
+    """
     attachments = []
     for part in payload.get("parts", []):
         filename = part.get("filename", "")
         mime_type = part.get("mimeType", "")
 
         if filename.lower().endswith(".pdf") or mime_type == "application/pdf":
-            att_id = part.get("body", {}).get("attachmentId")
+            body = part.get("body", {})
+            att_id = body.get("attachmentId")
             if att_id:
+                # Cas 1 : attachement classique (> ~2 Ko — récupéré via l'API)
                 att = (
                     services.gmail.users()
                     .messages()
@@ -107,8 +115,16 @@ def _find_pdf_attachments(
                 )
                 data = base64.urlsafe_b64decode(att["data"])
                 attachments.append((filename or "facture.pdf", data))
+            elif body.get("data"):
+                # Cas 2 : données inline (PDF embarqué directement dans le payload)
+                # Certains clients/relais email intègrent les PDFs directement
+                # sans passer par le mécanisme d'attachementId Gmail.
+                data = base64.urlsafe_b64decode(body["data"])
+                attachments.append((filename or "facture.pdf", data))
 
         if part.get("parts"):
+            # Cas 3 : récursion dans les parties imbriquées
+            # (multipart/mixed, multipart/alternative, message/rfc822…)
             attachments.extend(_find_pdf_attachments(part, message_id, services))
 
     return attachments

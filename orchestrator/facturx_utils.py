@@ -103,9 +103,11 @@ DENY_SOFT_KEYWORDS = [
 ]
 
 # Taille maximale du texte extrait pour être candidat facture.
-# Au-delà de 15 000 caractères, le document est quasi-certainement un
+# Au-delà de 30 000 caractères, le document est quasi-certainement un
 # catalogue/tarif (ex : TARIF IN-IPSO 2026 : 382 000 chars, 200+ pages).
-MAX_TEXT_LEN_FOR_INVOICE = 15_000
+# Note : 15 000 était trop restrictif pour les factures détaillées multi-pages
+# (ex : IPSO FAC0042658 sur 5 pages avec de nombreuses lignes d'aménagement).
+MAX_TEXT_LEN_FOR_INVOICE = 30_000
 
 # Taille maximale du fichier PDF pour être candidat facture (5 Mo).
 MAX_PDF_SIZE_FOR_INVOICE = 5_000_000
@@ -181,6 +183,17 @@ def build_folder_name(inv: dict) -> str:
     except Exception:
         dt = datetime.now()
     return f"{dt.year}-{dt.month:02d} {MOIS_FR.get(dt.month, '')}".strip()
+
+
+def build_supplier_folder_name(inv: dict) -> str:
+    """Construit le nom du sous-dossier Drive fournisseur.
+
+    Utilise nom_court en priorité, puis nom. Fallback sur 'Fournisseur_Inconnu'.
+    Exemple : 'IPSO', 'GPDIS', 'EDF'
+    """
+    vendeur = inv.get("vendeur", {}) or {}
+    name = (vendeur.get("nom_court") or vendeur.get("nom") or "Fournisseur_Inconnu").strip()
+    return sanitize_filename(name.replace(" ", "_")) or "Fournisseur_Inconnu"
 
 
 def _safe_float(val, default: float = 0.0) -> float:
