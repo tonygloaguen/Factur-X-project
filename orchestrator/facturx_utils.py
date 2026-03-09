@@ -318,8 +318,11 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
 }
 
 Règles CRITIQUES :
-- Le VENDEUR est celui qui ÉMET la facture (le fournisseur)
-- L'ACHETEUR est celui qui REÇOIT la facture
+- Le VENDEUR est celui qui ÉMET la facture (le fournisseur qui demande le paiement)
+- L'ACHETEUR est celui qui REÇOIT la facture (le client qui doit payer)
+- VENDEUR = l'expéditeur de l'email (champ "Expéditeur" du contexte email). Si le domaine de l'expéditeur correspond à une société visible dans le PDF, c'est le VENDEUR.
+- Ne confonds JAMAIS le client (destinataire de facturation, souvent en haut du PDF) avec le vendeur
+- Le numero_facture doit IMPÉRATIVEMENT être extrait du corps du PDF. N'utilise JAMAIS le sujet de l'email pour remplir numero_facture. Si aucun numéro n'est visible dans le texte du PDF, retourne null.
 - Le nom_court supprime les formes juridiques (SARL, SAS, GmbH, SA, etc.)
 - Si tu ne trouves pas une donnée, mets null (ne devine JAMAIS un SIRET/TVA)
 - Les montants sont des nombres décimaux (pas des strings)
