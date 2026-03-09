@@ -4,13 +4,20 @@ on:
   push:
     branches: ["main"]
 
+# Un seul build à la fois sur main — annule le précédent si un nouveau push arrive
+concurrency:
+  group: cd-docker-${{ github.ref }}
+  cancel-in-progress: true
+
 # Permissions minimales au niveau workflow (top-level)
 permissions:
   contents: read
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 explicite pour la reproductibilité (pas ubuntu-latest qui change silencieusement)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     permissions:
       contents: read
