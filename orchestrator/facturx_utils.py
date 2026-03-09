@@ -88,6 +88,7 @@ FACTURE_KEYWORDS = [
 DENY_HARD_KEYWORDS = [
     "curriculum vitae",
     "billet", "boarding pass", "vos billets",
+    "accusé de réception", "accuse de reception",
 ]
 
 # Deny SOFT : souvent pas une facture, MAIS peut apparaître dans une vraie
@@ -332,6 +333,7 @@ Règles CRITIQUES :
 - La ventilation_tva regroupe les lignes par taux de TVA
 - montant_du = montant restant à payer (= montant_ttc si pas d'acompte)
 - pays_code TOUJOURS en 2 lettres ISO (FR, DE, BE, CH...). Défaut "FR"
+- Un accusé de réception, un bon de livraison, un devis, une offre commerciale, une confirmation de commande ou tout document qui n'est PAS une demande de paiement → retourne "est_facture": false
 """
 
 

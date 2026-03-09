@@ -53,7 +53,6 @@ import io
 import logging
 import os
 import re
-import unicodedata
 from datetime import datetime
 
 import requests
@@ -82,39 +81,6 @@ logger = logging.getLogger("orchestrator")
 # Variables d'environnement lues une seule fois au chargement du module
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 GMAIL_LABEL_NAME = os.environ.get("GMAIL_LABEL", "Factures-Traitées")
-DRIVE_MATRIX_FILE_ID = os.environ.get("DRIVE_MATRIX_FILE_ID", "")
-# Nom de l'onglet de la matrice (laisser vide = premier onglet)
-DRIVE_MATRIX_SHEET_NAME = os.environ.get("DRIVE_MATRIX_SHEET_NAME", "")
-# Google Sheet de suivi linéaire des factures traitées (Suivi_Transmission_Factures_Comptable_MAJ)
-# Colonnes : Date | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut
-DRIVE_TRACKING_SHEET_ID = os.environ.get("DRIVE_TRACKING_SHEET_ID", "")
-
-# Noms des mois en français (pour la recherche de colonne dans la matrice)
-_MOIS_FR = {
-    1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
-    5: "Mai", 6: "Juin", 7: "Juillet", 8: "Août",
-    9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
-}
-
-
-def _col_letter(idx: int) -> str:
-    """Convertit un index de colonne 0-based en notation lettre A1 (A, B, ..., Z, AA, ...)."""
-    result = ""
-    idx += 1
-    while idx:
-        idx, rem = divmod(idx - 1, 26)
-        result = chr(ord("A") + rem) + result
-    return result
-
-
-def _norm(s: str) -> str:
-    """Normalise une chaîne : minuscules + suppression des accents (pour la correspondance floue)."""
-    return (
-        unicodedata.normalize("NFD", str(s).lower().strip())
-        .encode("ascii", "ignore")
-        .decode()
-    )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Nœud 1 : extract_text — OCR du PDF
@@ -507,129 +473,6 @@ def node_upload_drive(state: InvoiceState) -> dict:
         return {"processing_error": f"erreur_drive:{e}"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Nœud 8 : update_matrix — Mise à jour de la matrice Excel de suivi
-# ─────────────────────────────────────────────────────────────────────────────
-
-def node_update_matrix(state: InvoiceState) -> dict:
-    """
-    Coche la matrice Excel Suivi_Transmission_Factures_Comptable.xlsx sur Drive.
-
-    Recherche la ligne (client=acheteur, fournisseur=vendeur) et pose un "X"
-    dans la colonne correspondant au mois de la facture.
-
-    Matching : correspondance partielle insensible à la casse et aux accents.
-    Non-bloquant : toute erreur est loggée mais ne stoppe pas le workflow.
-
-    Pré-requis : variable d'env DRIVE_MATRIX_FILE_ID (ID Google Sheets).
-    """
-    if state.get("processing_error"):
-        return {}
-    if not DRIVE_MATRIX_FILE_ID:
-        logger.warning("[ 8/10] update_matrix : DRIVE_MATRIX_FILE_ID non configuré — mise à jour matrice désactivée")
-        return {}
-
-    inv = state.get("invoice_data", {})
-    vendor_name = inv.get("vendeur", {}).get("nom", "")
-    buyer_name = inv.get("acheteur", {}).get("nom", "")
-    invoice_date = inv.get("date_facture", "")
-
-    if not vendor_name:
-        logger.warning("[ 8/10] update_matrix : nom fournisseur manquant, skip")
-        return {}
-
-    # Déterminer le label de mois (ex: "Mars 2026")
-    try:
-        dt = datetime.strptime(invoice_date[:10], "%Y-%m-%d") if invoice_date else datetime.now()
-    except (ValueError, TypeError):
-        dt = datetime.now()
-    month_label = f"{_MOIS_FR[dt.month]} {dt.year}"
-
-    services: GoogleServices = state["services"]
-    logger.info(
-        "[ 8/10] update_matrix : fournisseur='%s' client='%s' mois='%s'",
-        vendor_name, buyer_name, month_label,
-    )
-
-    try:
-        # Lire toute la feuille (colonnes A à Z suffisent, ~15 colonnes max)
-        sheet_range = f"{DRIVE_MATRIX_SHEET_NAME}!A:Z" if DRIVE_MATRIX_SHEET_NAME else "A:Z"
-        result = services.sheets.spreadsheets().values().get(
-            spreadsheetId=DRIVE_MATRIX_FILE_ID,
-            range=sheet_range,
-        ).execute()
-        rows = result.get("values", [])
-
-        if not rows:
-            logger.warning("[ 8/10] update_matrix : feuille vide (onglet='%s')", DRIVE_MATRIX_SHEET_NAME or "premier onglet")
-            return {}
-
-        # Trouver la colonne du mois dans la ligne d'en-tête (ligne 0)
-        header = rows[0]
-        month_norm = _norm(month_label)
-        logger.info("[ 8/10] update_matrix : en-têtes trouvés = %s", header)
-        # Correspondance exacte d'abord, puis partielle (ex: "mars" contenu dans "mars 2026")
-        col_idx = next(
-            (i for i, h in enumerate(header) if _norm(h) == month_norm),
-            None,
-        )
-        if col_idx is None:
-            col_idx = next(
-                (i for i, h in enumerate(header) if month_norm in _norm(h) or _norm(h) in month_norm),
-                None,
-            )
-        if col_idx is None:
-            logger.warning(
-                "[ 8/10] update_matrix : colonne '%s' introuvable — en-têtes disponibles : %s",
-                month_label, header,
-            )
-            return {}
-
-        # Trouver la ligne : col A = client (acheteur), col B = fournisseur (vendeur)
-        vendor_norm = _norm(vendor_name)
-        buyer_norm = _norm(buyer_name) if buyer_name else None
-
-        row_idx = None
-        for i, row in enumerate(rows):
-            if i == 0:
-                continue  # Ignorer l'en-tête
-            cell_a = _norm(row[0]) if len(row) > 0 else ""
-            cell_b = _norm(row[1]) if len(row) > 1 else ""
-            # Correspondance partielle : le nom extrait peut être tronqué
-            vendor_match = vendor_norm in cell_b or cell_b in vendor_norm
-            buyer_match = buyer_norm is None or buyer_norm in cell_a or cell_a in buyer_norm
-            if vendor_match and buyer_match and cell_b:  # cell_b non vide (évite les lignes séparatrices)
-                row_idx = i
-                break
-
-        if row_idx is None:
-            sample = [(r[0] if len(r) > 0 else "", r[1] if len(r) > 1 else "") for r in rows[1:6]]
-            logger.warning(
-                "[ 8/10] update_matrix : aucune ligne pour fournisseur='%s' / client='%s' — "
-                "5 premières lignes (col A, col B) : %s",
-                vendor_name, buyer_name, sample,
-            )
-            return {}
-
-        # Écrire "X" dans la cellule (notation A1 — Sheets est 1-indexed)
-        cell_ref = f"{_col_letter(col_idx)}{row_idx + 1}"
-        services.sheets.spreadsheets().values().update(
-            spreadsheetId=DRIVE_MATRIX_FILE_ID,
-            range=cell_ref,
-            valueInputOption="RAW",
-            body={"values": [["X"]]},
-        ).execute()
-
-        logger.info(
-            "[ 8/10] update_matrix : X écrit en %s (fournisseur=%s, client=%s, mois=%s)",
-            cell_ref, vendor_name, buyer_name, month_label,
-        )
-
-    except Exception as e:
-        logger.error("[ 8/10] update_matrix : erreur non-bloquante — %s", e)
-
-    return {}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Nœud 9 : label_gmail — Labellisation Gmail
@@ -699,52 +542,6 @@ def node_label_gmail(state: InvoiceState) -> dict:
     return {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper : mise à jour du fichier de suivi linéaire des factures traitées
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _update_tracking_sheet(services: GoogleServices, inv: dict, drive_url: str) -> None:
-    """
-    Ajoute une ligne de suivi dans le Google Sheet Suivi_Transmission_Factures_Comptable_MAJ.
-
-    Colonnes attendues (A→H) :
-      Date traitement | Fournisseur | N° Facture | HT | TVA | TTC | Lien Drive | Statut
-
-    Non-bloquant : toute erreur est loggée mais ne stoppe pas le workflow.
-    Ignoré si DRIVE_TRACKING_SHEET_ID n'est pas configuré dans l'environnement.
-
-    Garde : les faux positifs (catalogues) ne passent jamais ici car ils sont
-    rejetés avant (garde-fous A/B/C) et n'atteignent pas le branch success de log_result.
-    """
-    if not DRIVE_TRACKING_SHEET_ID:
-        return
-
-    try:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        vendor = (inv.get("vendeur", {}) or {}).get("nom", "Fournisseur inconnu")
-        numero = inv.get("numero_facture") or ""
-        ht = float(inv.get("montant_ht", 0.0) or 0.0)
-        tva = float(inv.get("montant_tva", 0.0) or 0.0)
-        ttc = float(inv.get("montant_ttc", 0.0) or 0.0)
-
-        row = [[now_str, vendor, numero, ht, tva, ttc, drive_url, "success"]]
-
-        services.sheets.spreadsheets().values().append(
-            spreadsheetId=DRIVE_TRACKING_SHEET_ID,
-            range="A:H",
-            valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
-            body={"values": row},
-        ).execute()
-
-        logger.info(
-            "Suivi MAJ : ligne ajoutée — %s | %s | HT=%.2f€ TTC=%.2f€",
-            vendor, numero, ht, ttc,
-        )
-
-    except Exception as e:
-        logger.error("Erreur mise à jour suivi MAJ (non-bloquant) : %s", e)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Nœud 9 : log_result — Log final + écriture SQLite
@@ -810,11 +607,6 @@ def node_log_result(state: InvoiceState) -> dict:
             detail=f"{vendor} | {numero} | {ttc}€",
             drive_url=url,
         )
-
-        # Mise à jour du fichier de suivi linéaire (non-bloquant)
-        services_obj = state.get("services")
-        if services_obj:
-            _update_tracking_sheet(services_obj, inv, url)
 
         logger.info("✅ Succès : %s | %s | %s€ TTC → %s", vendor, numero, ttc, url)
 
