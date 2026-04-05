@@ -99,7 +99,7 @@ jobs:
       # exit-code: "1" → bloquant sur toute misconfiguration détectée
       - name: Trivy – scan Dockerfile (config)
         # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: config
           scan-ref: orchestrator/Dockerfile
@@ -109,7 +109,7 @@ jobs:
       # Scan CVE + secrets dans le filesystem Python — bloquant CRITICAL et HIGH uniquement
       - name: Trivy – scan filesystem (dépendances Python)
         # TODO : pinner sur SHA complet via Renovate/Dependabot (CKV_GHA_1)
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: orchestrator/
