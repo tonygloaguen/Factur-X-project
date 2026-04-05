@@ -27,7 +27,7 @@ def _minimal_invoice_data_en16931() -> dict:
         "est_facture": True,
         "numero_facture": "TEST-0001",
         "date_facture": "2026-02-24",
-        "date_echeance": None,
+        "date_echeance": "2026-03-24",        # ← BR-CO-25 : date échéance obligatoire
         "type_facture": "380",
         "devise": "EUR",
         "vendeur": {
@@ -35,7 +35,7 @@ def _minimal_invoice_data_en16931() -> dict:
             "nom_court": "MSA",
             "siret": None,
             "siren": None,
-            "tva_intra": None,
+            "tva_intra": "FR12345678901",     # ← BR-CO-26 + BR-S-02 : TVA vendeur obligatoire
             "adresse_ligne1": "1 rue du Test",
             "adresse_ligne2": None,
             "code_postal": "75001",
@@ -82,7 +82,6 @@ def _minimal_invoice_data_en16931() -> dict:
         "bic": None,
         "notes": None,
     }
-
 
 def test_pdf_to_facturx_en16931_embeds_xml():
     # Force le profil pour ce test (au cas où l'env diffère)
