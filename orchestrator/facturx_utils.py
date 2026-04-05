@@ -755,8 +755,15 @@ def generate_facturx_xml_en16931(inv: dict) -> bytes:
         buyer_tax = etree.SubElement(buyer, _el("ram", "SpecifiedTaxRegistration"))
         etree.SubElement(buyer_tax, _el("ram", "ID"), schemeID="VA").text = acheteur["tva_intra"]
 
-    # ── ApplicableHeaderTradeDelivery (BG-13 : obligatoire, peut être vide) ─
-    etree.SubElement(txn, _el("ram", "ApplicableHeaderTradeDelivery"))
+    # ── ApplicableHeaderTradeDelivery (BG-13 : requis par XSD CII) ──────────
+    # PEPPOL-EN16931-R008 interdit les éléments vides → on ajoute la date de
+    # livraison (BT-72) si disponible, sinon on replie sur la date de facture.
+    delivery = etree.SubElement(txn, _el("ram", "ApplicableHeaderTradeDelivery"))
+    delivery_date = inv.get("date_livraison") or inv.get("date_facture")
+    if delivery_date:
+        event = etree.SubElement(delivery, _el("ram", "ActualDeliverySupplyChainEvent"))
+        occ = etree.SubElement(event, _el("ram", "OccurrenceDateTime"))
+        etree.SubElement(occ, _el("udt", "DateTimeString"), format="102").text = delivery_date.replace("-", "")
 
     # ── ApplicableHeaderTradeSettlement ─────────────────────────────────────
     settle_h = etree.SubElement(txn, _el("ram", "ApplicableHeaderTradeSettlement"))
@@ -801,10 +808,10 @@ def generate_facturx_xml_en16931(inv: dict) -> bytes:
     sum_lines_net = _safe_float(inv.get("montant_total_lignes_net")) or ht
 
     etree.SubElement(summ, _el("ram", "LineTotalAmount")).text = f"{sum_lines_net:.2f}"
-    etree.SubElement(summ, _el("ram", "TaxBasisTotalAmount"), currencyID=devise).text = f"{ht:.2f}"
+    etree.SubElement(summ, _el("ram", "TaxBasisTotalAmount")).text = f"{ht:.2f}"
     etree.SubElement(summ, _el("ram", "TaxTotalAmount"), currencyID=devise).text = f"{tva_total:.2f}"
-    etree.SubElement(summ, _el("ram", "GrandTotalAmount"), currencyID=devise).text = f"{ttc:.2f}"
-    etree.SubElement(summ, _el("ram", "DuePayableAmount"), currencyID=devise).text = f"{du:.2f}"
+    etree.SubElement(summ, _el("ram", "GrandTotalAmount")).text = f"{ttc:.2f}"
+    etree.SubElement(summ, _el("ram", "DuePayableAmount")).text = f"{du:.2f}"
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
 
