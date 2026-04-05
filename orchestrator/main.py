@@ -62,7 +62,7 @@ def _ensure_7d(q: str) -> str:
     q = (q or "").strip()
     return q if "newer_than:" in q else (q + " newer_than:7d").strip()
 
-
+GMAIL_MAX_RESULTS = int(os.environ.get("GMAIL_MAX_RESULTS", "10"))
 GMAIL_QUERY = _ensure_7d(
     os.environ.get(
         "GMAIL_QUERY",
@@ -170,7 +170,7 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
         results = (
             services.gmail.users()
             .messages()
-            .list(userId="me", q=GMAIL_QUERY, maxResults=10)
+            .list(userId="me", q=GMAIL_QUERY, maxResults=GMAIL_MAX_RESULTS)
             .execute()
         )
         messages = results.get("messages", [])
