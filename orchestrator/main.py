@@ -55,14 +55,15 @@ HEARTBEAT_FILE = Path("/tmp/heartbeat")  # Lu par le HEALTHCHECK Docker
 MAX_EMAILS_PER_CYCLE = int(os.environ.get("MAX_EMAILS_PER_CYCLE", "3"))
 MIN_SECONDS_BETWEEN_CALLS = float(os.environ.get("MIN_SECONDS_BETWEEN_CALLS", "15"))
 MAX_GEMINI_REQUESTS_PER_DAY = int(os.environ.get("MAX_GEMINI_REQUESTS_PER_DAY", "18"))
-
+GMAIL_MAX_RESULTS = int(os.environ.get("GMAIL_MAX_RESULTS", "10"))
 
 def _ensure_7d(q: str) -> str:
-    """Garantit que la requête Gmail ne remonte pas plus de 7 jours."""
+    """Garantit que la requête Gmail ne remonte pas plus de 7 jours (désactivable via GMAIL_ENFORCE_7D=false)."""
+    if os.environ.get("GMAIL_ENFORCE_7D", "true").lower() != "true":
+        return (q or "").strip()
     q = (q or "").strip()
     return q if "newer_than:" in q else (q + " newer_than:7d").strip()
 
-GMAIL_MAX_RESULTS = int(os.environ.get("GMAIL_MAX_RESULTS", "10"))
 GMAIL_QUERY = _ensure_7d(
     os.environ.get(
         "GMAIL_QUERY",
