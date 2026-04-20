@@ -254,14 +254,66 @@ class StateDB:
             "created_at": row[5],
         }
 
+    def get_entry(self, message_id: str, filename: str) -> Optional[dict]:
+        """Retourne l'entrée complète pour (message_id, filename), ou None si absente."""
+        row = self._conn.execute(
+            """SELECT message_id, filename, status, detail, drive_url, created_at, superseded_by
+               FROM processed WHERE message_id = ? AND filename = ?""",
+            (message_id, filename),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "message_id":   row[0],
+            "filename":     row[1],
+            "status":       row[2],
+            "detail":       row[3],
+            "drive_url":    row[4],
+            "created_at":   row[5],
+            "superseded_by": row[6],
+        }
+
     def mark_superseded(self, old_message_id: str, filename: str, new_message_id: str) -> None:
         """Marque une occurrence précédente comme remplacée par la nouvelle.
 
         Appelé dans node_log_result après un succès sur un fichier déjà connu.
         Après cet appel, get_latest_by_filename() retourne la nouvelle occurrence.
 
-        Note : on ne supprime rien — l'historique complet est conservé pour audit.
+        Garde-fou intra-cycle (batch 3) :
+          Si les deux entrées ont été traitées dans un intervalle inférieur à
+          SAME_CYCLE_GUARD_SECONDS, on refuse la supersession. Cela protège contre
+          le cas où Gmail retourne les emails newest-first et où l'email le plus
+          ancien (traité en second) tenterait incorrectement de superséder le plus
+          récent (traité en premier). Les cycles de polling étant de 15 min,
+          un delta < 90s indique des traitements du même cycle.
         """
+        SAME_CYCLE_GUARD_SECONDS = 90
+
+        old_row = self._conn.execute(
+            "SELECT created_at FROM processed WHERE message_id = ? AND filename = ?",
+            (old_message_id, filename),
+        ).fetchone()
+        new_row = self._conn.execute(
+            "SELECT created_at FROM processed WHERE message_id = ? AND filename = ?",
+            (new_message_id, filename),
+        ).fetchone()
+
+        if old_row and new_row:
+            try:
+                old_ts = datetime.fromisoformat(old_row[0])
+                new_ts = datetime.fromisoformat(new_row[0])
+                delta = (new_ts - old_ts).total_seconds()
+                if delta < SAME_CYCLE_GUARD_SECONDS:
+                    logger.warning(
+                        "mark_superseded refusé (même cycle probable, delta=%.0fs < %ds) : "
+                        "msg %s… ne remplace pas msg %s… pour '%s'",
+                        delta, SAME_CYCLE_GUARD_SECONDS,
+                        new_message_id[:12], old_message_id[:12], filename,
+                    )
+                    return
+            except Exception as exc:
+                logger.debug("Comparaison timestamps mark_superseded échouée : %s", exc)
+
         self._conn.execute(
             """UPDATE processed SET superseded_by = ?
                WHERE message_id = ? AND filename = ? AND superseded_by IS NULL""",

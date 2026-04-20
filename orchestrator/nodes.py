@@ -263,6 +263,14 @@ def node_call_gemini(state: InvoiceState) -> dict:
         logger.error("Erreur HTTP Gemini (%s)", status)
         return {"gemini_used": True, "processing_error": f"erreur_http_gemini:{status}"}
 
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        # Erreur réseau/DNS (connexion refusée, timeout, résolution DNS échouée).
+        # Transiente : NE PAS marquer dans SQLite → retentable au prochain cycle.
+        logger.warning(
+            "Erreur réseau Gemini (%s) — sera retenté au prochain cycle", type(e).__name__
+        )
+        return {"processing_error": f"erreur_transient:reseau:{type(e).__name__}"}
+
     except Exception as e:
         logger.error("Erreur appel Gemini : %s", e)
         return {"gemini_used": True, "processing_error": f"erreur_gemini:{e}"}
@@ -634,6 +642,14 @@ def node_log_result(state: InvoiceState) -> dict:
         prior_msg_id = state.get("prior_message_id", "")
         if prior_msg_id and prior_msg_id != state["message_id"]:
             try:
+                # Audit Drive drift : l'ancienne version reste sur Drive (pas supprimée).
+                # L'URL est loggée pour permettre un nettoyage manuel si nécessaire.
+                old_entry = db.get_entry(prior_msg_id, state["pdf_filename"])
+                if old_entry and old_entry.get("drive_url"):
+                    logger.info(
+                        "Drive drift : ancienne version conservée (nettoyage manuel requis) : %s",
+                        old_entry["drive_url"],
+                    )
                 db.mark_superseded(prior_msg_id, state["pdf_filename"], state["message_id"])
                 logger.info(
                     "Occurrence supersédée : %s… → %s… (%s)",

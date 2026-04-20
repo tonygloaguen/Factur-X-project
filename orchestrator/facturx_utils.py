@@ -218,9 +218,16 @@ CLIENT_FINAL_BLACKLIST: list[str] = [
 _PRODUCT_WORDS: frozenset[str] = frozenset([
     "cuisine", "cuisines", "meuble", "meubles", "tiroir", "tiroirs",
     "pose", "livraison", "montage", "installation", "service", "services",
-    "total", "frais", "taxes", "modele", "modele", "reference",
+    "total", "frais", "taxes", "modele", "reference",
     "article", "produit", "fourniture", "acompte", "solde",
     "renovation", "travaux", "chantier", "amenagement",
+    # Batch 3: termes supplémentaires bâtiment/cuisine/salle de bain
+    "salle", "bain", "dressing", "placard", "rangement",
+    "electromenager", "electromenagers", "robinetterie",
+    "carrelage", "parquet", "peinture", "electricite",
+    "plomberie", "menuiserie", "maconnerie", "isolation",
+    "baignoire", "douche", "lavabo", "evier", "credence",
+    "quincaillerie", "accessoire", "accessoires",
 ])
 
 # Motif pour les champs métier signalant explicitement le client final dans le texte OCR.
@@ -245,6 +252,20 @@ def _normalize_for_cmp(s: str) -> str:
     s = unicodedata.normalize("NFD", (s or "").lower())
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _clean_candidate_name(candidate: str) -> str:
+    """Retire les mots-produits en tête et en queue d'un candidat nom propre.
+
+    Évite les faux positifs comme "Pose Cuisine Martin Dupont" → "Martin Dupont".
+    Retourne une chaîne vide si tous les mots sont des mots-produits.
+    """
+    words = candidate.split()
+    while words and _normalize_for_cmp(words[0]) in _PRODUCT_WORDS:
+        words = words[1:]
+    while words and _normalize_for_cmp(words[-1]) in _PRODUCT_WORDS:
+        words = words[:-1]
+    return " ".join(words)
 
 
 def _is_client_blacklisted(name: str, vendor_name: str = "") -> bool:
@@ -312,7 +333,9 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
         if not desc:
             continue
         for m in _PROPER_NAME_RE.finditer(desc):
-            candidate = m.group(1).strip()
+            candidate = _clean_candidate_name(m.group(1).strip())
+            if not candidate:
+                continue
             if not _is_client_blacklisted(candidate, vendor_name):
                 logger.debug("client_final (ligne) : %s", candidate)
                 return candidate
@@ -323,6 +346,20 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
     if buyer_name and not _is_client_blacklisted(buyer_name, vendor_name):
         logger.debug("client_final (acheteur) : %s", buyer_name)
         return buyer_name
+
+    # ── Priorité 3b : reference_commande / notes — noms propres structurés ─────
+    # Cas IN IPSO : acheteur blacklisté (JMT Déco) mais reference_commande
+    # ou notes peut contenir le nom du client final réel.
+    for field_text in [invoice_data.get("reference_commande"), invoice_data.get("notes")]:
+        if not field_text:
+            continue
+        for m in _PROPER_NAME_RE.finditer(str(field_text)):
+            candidate = _clean_candidate_name(m.group(1).strip())
+            if not candidate:
+                continue
+            if not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (reference/notes) : %s", candidate)
+                return candidate
 
     # ── Fallback ────────────────────────────────────────────────────────────────
     logger.debug("client_final : fallback A_CLASSER")
@@ -578,7 +615,19 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     last_status = None
     raw_text = None
     for attempt in range(1, max_attempts + 1):
-        resp = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
+        try:
+            resp = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as net_err:
+            # Erreur réseau (DNS, connexion refusée, timeout) → transiente.
+            sleep_s = min(60, base_sleep * (2 ** (attempt - 1))) + attempt * 0.3
+            logger.warning(
+                "Erreur réseau Gemini (%s) — tentative %d/%d, pause %.1fs",
+                type(net_err).__name__, attempt, max_attempts, sleep_s,
+            )
+            if attempt < max_attempts:
+                time.sleep(sleep_s)
+                continue
+            raise  # Dernière tentative : propager vers node_call_gemini
         last_status = resp.status_code
 
         if resp.status_code == 429:
