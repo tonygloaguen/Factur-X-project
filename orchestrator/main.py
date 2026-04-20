@@ -219,13 +219,37 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
                     continue
 
                 for att_filename, att_bytes in attachments:
-                    # Anti-retraitement SQLite : skip si déjà traité
+                    # ── Étape 1 : skip si (message_id, filename) exactement déjà traité ──
+                    # Protège contre le retraitement du même email lors d'un polling ultérieur
+                    # (cas normal : l'email n'a pas encore été labellisé).
                     if state_db.is_seen(msg_id, att_filename):
                         logger.info(
-                            "⏭️  Déjà traité : '%s' / %s — skip",
+                            "⏭️  Déjà traité (même email+fichier) : '%s' / %s — skip",
                             subject[:50], att_filename,
                         )
                         continue
+
+                    # ── Étape 2 : règle "dernière occurrence fait foi" ─────────
+                    # Un même nom de fichier peut arriver dans plusieurs emails distincts
+                    # (ex : fournisseur qui renvoi la facture corrigée).
+                    # Règle : la dernière occurrence reçue fait foi → on retraite.
+                    # Exception : si l'occurrence précédente était not_invoice,
+                    # le même PDF reste non-facture (décision stable).
+                    prior = state_db.get_latest_by_filename(att_filename)
+                    if prior and prior["status"] == "not_invoice":
+                        logger.info(
+                            "⏭️  Fichier '%s' déjà classé not_invoice (msg: %s…) — skip",
+                            att_filename, prior["message_id"][:12],
+                        )
+                        continue
+
+                    prior_msg_id = prior["message_id"] if prior else ""
+                    if prior_msg_id:
+                        logger.info(
+                            "↩️  Nouvelle occurrence de '%s' "
+                            "(précédent: statut=%s, msg=%s…) — retraitement",
+                            att_filename, prior["status"], prior_msg_id[:12],
+                        )
 
                     logger.info("━" * 60)
                     logger.info("Nouvel email : '%s' de %s", subject[:60], sender[:50])
@@ -253,6 +277,10 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
                         "drive_file_id": "",
                         "drive_file_url": "",
                         "processing_error": "",
+                        # Déduplication par nom de fichier (batch 1)
+                        "prior_message_id": prior_msg_id,
+                        # Client final pour le classement Drive (batch 2)
+                        "client_final": "",
                         # Services (singletons injectés)
                         "services": services,
                         "state_db": state_db,
