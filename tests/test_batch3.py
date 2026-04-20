@@ -388,3 +388,79 @@ class TestInIpsoFallback:
         result = extract_final_client(inv, "")
         # "Pierre Laurent" → 2 mots capitalisés, ni blacklistés ni produits
         assert "Laurent" in result
+
+    def test_notes_contremarque_pattern_extracts_client(self):
+        """notes avec pattern 'Chantier: NOM' → NOM via _CONTREMARQUE_RE."""
+        from facturx_utils import extract_final_client
+        inv = _inv(vendor="IN IPSO", buyer="JMT Déco",
+                   notes="Chantier: DUPONT livraison mars 2026")
+        result = extract_final_client(inv, "")
+        assert "DUPONT" in result
+
+    def test_reference_commande_contremarque_pattern(self):
+        """reference_commande 'Affaire: BERNARD' → BERNARD via _CONTREMARQUE_RE."""
+        from facturx_utils import extract_final_client
+        inv = _inv(vendor="IN IPSO", buyer="JMT Déco",
+                   reference_commande="Affaire: BERNARD 2026")
+        result = extract_final_client(inv, "")
+        assert "BERNARD" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# is_transient_error — point central de détection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestIsTransientError:
+
+    def test_rate_limit_429_is_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("rate_limit_429") is True
+
+    def test_erreur_transient_503_is_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("erreur_transient:503") is True
+
+    def test_erreur_transient_reseau_is_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("erreur_transient:reseau:ConnectionError") is True
+
+    def test_erreur_transient_reseau_timeout_is_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("erreur_transient:reseau:Timeout") is True
+
+    def test_permanent_error_not_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("erreur_json_permanent:bad json") is False
+
+    def test_not_invoice_not_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("not_invoice:deny_hard:lcr") is False
+
+    def test_empty_string_not_transient(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error("") is False
+
+    def test_none_handled(self):
+        from facturx_utils import is_transient_error
+        assert is_transient_error(None) is False  # type: ignore
+
+    def test_node_log_result_uses_is_transient_for_reseau(self, tmp_path):
+        """node_log_result ne marque pas SQLite pour erreur_transient:reseau:*."""
+        from services import StateDB
+        from nodes import node_log_result
+        db = StateDB(str(tmp_path / "test.db"))
+        state = {
+            "message_id": "msg_reseau",
+            "pdf_filename": "facture.pdf",
+            "subject": "Test",
+            "sender": "x@x.com",
+            "processing_error": "erreur_transient:reseau:Timeout",
+            "state_db": db,
+            "invoice_data": {},
+            "drive_file_url": "",
+            "gemini_used": False,
+            "prior_message_id": "",
+            "client_final": "",
+        }
+        node_log_result(state)
+        assert not db.is_seen("msg_reseau", "facture.pdf")

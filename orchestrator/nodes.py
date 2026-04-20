@@ -73,6 +73,7 @@ from facturx_utils import (
     build_folder_name,
     build_supplier_folder_name,
     build_client_folder_name,
+    is_transient_error,
     GeminiJsonDecodeError,
     MAX_PDF_SIZE_FOR_INVOICE,
 )
@@ -600,8 +601,8 @@ def node_log_result(state: InvoiceState) -> dict:
         logger.info("⏭️  Non-facture : '%s' / %s — %s",
                     state.get("subject", "?")[:50], state["pdf_filename"], error)
 
-    elif error == "rate_limit_429" or error.startswith("erreur_transient:"):
-        # Erreur transiente (rate limit 429 ou service unavailable 502/503/504) :
+    elif is_transient_error(error):
+        # Erreur transiente (rate limit, service unavailable, réseau) :
         # NE PAS marquer dans SQLite — l'email reste sans label "Factures-Traitées"
         # et sera retenté au prochain cycle de polling.
         logger.warning(

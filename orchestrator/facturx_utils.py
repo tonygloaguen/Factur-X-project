@@ -347,23 +347,43 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
         logger.debug("client_final (acheteur) : %s", buyer_name)
         return buyer_name
 
-    # ── Priorité 3b : reference_commande / notes — noms propres structurés ─────
+    # ── Priorité 3b : reference_commande / notes — champs structurés ──────────
     # Cas IN IPSO : acheteur blacklisté (JMT Déco) mais reference_commande
-    # ou notes peut contenir le nom du client final réel.
+    # ou notes peut contenir le client final réel.
+    # Stratégie : d'abord _CONTREMARQUE_RE (ex: "Chantier: GARNIER"),
+    # puis _PROPER_NAME_RE en fallback (ex: "Brigitte Whitechurch").
     for field_text in [invoice_data.get("reference_commande"), invoice_data.get("notes")]:
         if not field_text:
             continue
-        for m in _PROPER_NAME_RE.finditer(str(field_text)):
+        text = str(field_text)
+        for m in _CONTREMARQUE_RE.finditer(text):
+            candidate = m.group(1).strip().rstrip(".,;: ")
+            if candidate and not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (ref/notes contremarque) : %s", candidate)
+                return candidate.upper()
+        for m in _PROPER_NAME_RE.finditer(text):
             candidate = _clean_candidate_name(m.group(1).strip())
             if not candidate:
                 continue
             if not _is_client_blacklisted(candidate, vendor_name):
-                logger.debug("client_final (reference/notes) : %s", candidate)
+                logger.debug("client_final (ref/notes nom propre) : %s", candidate)
                 return candidate
 
     # ── Fallback ────────────────────────────────────────────────────────────────
     logger.debug("client_final : fallback A_CLASSER")
     return "A_CLASSER"
+
+
+def is_transient_error(error: str) -> bool:
+    """Retourne True si l'erreur est transiente : retriable, ne doit pas être persistée dans SQLite.
+
+    Couvre :
+      - rate_limit_429          : quota Gemini dépassé
+      - erreur_transient:NNN    : HTTP 502/503/504 Gemini
+      - erreur_transient:reseau : ConnectionError / Timeout / DNS
+    """
+    s = error or ""
+    return s == "rate_limit_429" or s.startswith("erreur_transient:")
 
 
 def build_client_folder_name(invoice_data: dict, ocr_text: str = "") -> str:

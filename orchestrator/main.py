@@ -182,6 +182,11 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
 
         logger.info("%d email(s) trouvé(s) par Gmail", len(messages))
         processed_count = 0
+        # Gmail retourne les emails newest-first. Le 1er email rencontré pour un
+        # filename est donc le plus récent → c'est le seul à traiter dans ce cycle.
+        # Les emails plus anciens avec le même filename sont ignorés ici.
+        # mark_superseded reste en place comme filet de sécurité secondaire.
+        cycle_filenames: set[str] = set()
 
         for msg_info in messages:
             # Limite par cycle (évite de tout traiter d'un coup)
@@ -219,6 +224,15 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
                     continue
 
                 for att_filename, att_bytes in attachments:
+                    # ── Guard intra-cycle ──────────────────────────────────────
+                    if att_filename in cycle_filenames:
+                        logger.info(
+                            "⏭️  Doublon intra-cycle '%s' — email plus ancien ignoré",
+                            att_filename,
+                        )
+                        continue
+                    cycle_filenames.add(att_filename)
+
                     # ── Étape 1 : skip si (message_id, filename) exactement déjà traité ──
                     # Protège contre le retraitement du même email lors d'un polling ultérieur
                     # (cas normal : l'email n'a pas encore été labellisé).
