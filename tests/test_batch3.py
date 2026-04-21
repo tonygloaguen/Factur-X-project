@@ -464,3 +464,141 @@ class TestIsTransientError:
         }
         node_log_result(state)
         assert not db.is_seen("msg_reseau", "facture.pdf")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Non-régression Interbat FA131242 — "Amelia" est un modèle produit, pas un client
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestInterbatFA131242:
+    """
+    Cas réel : Interbat FA131242 — Evier Amelia XL dans les lignes produit.
+
+    Signal métier correct : "Référence : MARTINEAU" et "C/M MARTINEAU" dans l'OCR.
+    Acheteur : "RAISON HOME - JMT DECO" → blacklisté.
+    Attendu : client_final = "MARTINEAU", jamais "Amelia".
+    """
+
+    OCR_REEL = (
+        "interbat CUISINE ET SALLE DE BAINS\n"
+        "Facture FA131242\n"
+        "Réf. Client : 78RAISON1\n"
+        "Référence : MARTINEAU\n"
+        "Date livraison : 24/03/26\n"
+        "Adresse de facturation\n"
+        "RAISON HOME - JMT DECO\n"
+        "8 ALLEE DU MOULIN DES VASSAUX\n"
+        "78114 MAGNY LES HAMEAUX\n"
+        "Référence    Désignation    Qté    PU Brut    Remise %    PU Net    Montant HT\n"
+        "EVI3013    Evier Amelia XL 1 Cuve Sable Métal Bonde Manuel Chromé    1    375,74\n"
+        "MIC1002    Mitigeur cuisine classique bas Elorn Chromé    1    166,97\n"
+        "C/M MARTINEAU\n"
+    )
+
+    INV = {
+        "vendeur": {"nom": "Interbat SAS", "nom_court": "Interbat"},
+        "acheteur": {"nom": "RAISON HOME - JMT DECO", "nom_court": "RAISON HOME"},
+        "lignes": [
+            {"description": "Evier Amelia XL 1 Cuve Sable Métal Bonde Manuel Chromé"},
+            {"description": "Mitigeur cuisine classique bas Elorn Chromé"},
+            {"description": "C/M MARTINEAU"},
+        ],
+        "reference_commande": "78RAISON1",
+        "notes": None,
+    }
+
+    def test_full_case_returns_martineau(self):
+        """Cas complet FA131242 : client final = MARTINEAU."""
+        from facturx_utils import extract_final_client
+        result = extract_final_client(self.INV, self.OCR_REEL)
+        assert result == "MARTINEAU", f"Attendu MARTINEAU, obtenu '{result}'"
+
+    def test_amelia_never_extracted(self):
+        """'Amelia' (modèle produit) ne doit jamais être le client final."""
+        from facturx_utils import extract_final_client
+        result = extract_final_client(self.INV, self.OCR_REEL)
+        assert "Amelia" not in result
+
+    def test_reference_field_extracts_martineau(self):
+        """'Référence : MARTINEAU' dans l'OCR → MARTINEAU via _CONTREMARQUE_RE."""
+        from facturx_utils import extract_final_client
+        ocr = "Réf. Client : 78RAISON1\nRéférence : MARTINEAU\n"
+        inv = {
+            "vendeur": {"nom": "Interbat", "nom_court": "Interbat"},
+            "acheteur": {"nom": "RAISON HOME", "nom_court": "RAISON HOME"},
+            "lignes": [],
+            "reference_commande": None,
+            "notes": None,
+        }
+        result = extract_final_client(inv, ocr)
+        assert result == "MARTINEAU"
+
+    def test_cm_pattern_extracts_martineau(self):
+        """'C/M MARTINEAU' dans l'OCR → MARTINEAU via _CM_RE."""
+        from facturx_utils import extract_final_client
+        ocr = "EVI3013 Evier Amelia XL\nC/M MARTINEAU\n"
+        inv = {
+            "vendeur": {"nom": "Interbat", "nom_court": "Interbat"},
+            "acheteur": {"nom": "JMT Déco", "nom_court": "JMT Déco"},
+            "lignes": [{"description": "Evier Amelia XL 1 Cuve"}],
+            "reference_commande": None,
+            "notes": None,
+        }
+        result = extract_final_client(inv, ocr)
+        assert result == "MARTINEAU"
+
+    def test_amelia_alone_after_clean_rejected_from_lignes(self):
+        """'Evier Amelia' → après strip 'Evier' → 'Amelia' seul → rejeté des lignes."""
+        from facturx_utils import extract_final_client
+        inv = {
+            "vendeur": {"nom": "Interbat", "nom_court": "Interbat"},
+            "acheteur": {"nom": "JMT Déco", "nom_court": "JMT Déco"},
+            "lignes": [{"description": "Evier Amelia XL 1 Cuve Sable Métal Bonde Manuel Chromé"}],
+            "reference_commande": None,
+            "notes": None,
+        }
+        result = extract_final_client(inv, "")  # pas d'OCR → seules les lignes
+        assert result == "A_CLASSER", f"Attendu A_CLASSER, obtenu '{result}'"
+
+    def test_cm_without_slash_also_works(self):
+        """'CM MARTINEAU' (sans slash) → MARTINEAU."""
+        from facturx_utils import extract_final_client
+        ocr = "CM MARTINEAU\n"
+        inv = {
+            "vendeur": {"nom": "Interbat", "nom_court": "Interbat"},
+            "acheteur": {"nom": "JMT Déco", "nom_court": "JMT Déco"},
+            "lignes": [],
+            "reference_commande": None,
+            "notes": None,
+        }
+        result = extract_final_client(inv, ocr)
+        assert result == "MARTINEAU"
+
+    def test_reference_client_code_not_extracted(self):
+        """'Réf. Client : 78RAISON1' → code, pas un nom de client (non extrait)."""
+        from facturx_utils import extract_final_client
+        # Seulement "Réf. Client : 78RAISON1", pas de "Référence : NOM"
+        ocr = "Réf. Client : 78RAISON1\n"
+        inv = {
+            "vendeur": {"nom": "Interbat", "nom_court": "Interbat"},
+            "acheteur": {"nom": "JMT Déco", "nom_court": "JMT Déco"},
+            "lignes": [],
+            "reference_commande": None,
+            "notes": None,
+        }
+        # "Réf. Client" ≠ "Référence" → ne doit PAS matcher _CONTREMARQUE_RE
+        result = extract_final_client(inv, ocr)
+        assert "78RAISON1" not in result  # code alphanumérique → ne doit pas être client
+
+    def test_two_word_name_still_extracted_from_ligne(self):
+        """'Brigitte Whitechurch' dans une ligne → toujours extrait (2 mots, non blacklisté)."""
+        from facturx_utils import extract_final_client
+        inv = {
+            "vendeur": {"nom": "BAUS", "nom_court": "BAUS"},
+            "acheteur": {"nom": "JMT Déco", "nom_court": "JMT Déco"},
+            "lignes": [{"description": "Brigitte Whitechurch - cuisine sur mesure"}],
+            "reference_commande": None,
+            "notes": None,
+        }
+        result = extract_final_client(inv, "")
+        assert "Whitechurch" in result
