@@ -228,15 +228,29 @@ _PRODUCT_WORDS: frozenset[str] = frozenset([
     "plomberie", "menuiserie", "maconnerie", "isolation",
     "baignoire", "douche", "lavabo", "evier", "credence",
     "quincaillerie", "accessoire", "accessoires",
+    # Hardening: matériaux, finitions et désignations produit capitulatés dans les descriptions
+    # qui peuvent ressembler à des noms propres (ex: "Cuve Sable Métal Bonde Manuel Chromé").
+    "cuve", "sable", "bonde", "chrome", "metal", "inox",
+    "mitigeur", "mitigeurs", "vasque", "vasques",
+    "classique", "moderne", "design", "standard", "premium",
+    "blanc", "noir", "gris", "beige", "anthracite",
 ])
 
 # Motif pour les champs métier signalant explicitement le client final dans le texte OCR.
 # Priorité maximale : plus fiable que l'acheteur ou les lignes.
 _CONTREMARQUE_RE = re.compile(
     r'(?:contremarque|chantier|rep[eè]re\s*(?:client)?|ref\.?\s*chantier|'
+    r'r[eé]f[eé]rence(?!\s*(?:client|commande))|'  # "Référence : X" mais pas "Réf. client"
     r'client\s*final|destinataire\s*final|dossier\s*client|affaire)\s*[:\-–]\s*'
     r'([A-Za-zÀ-ÿ0-9][^\n,;|]{1,60})',
     re.IGNORECASE,
+)
+
+# Contremarque abrégée "C/M NOM" ou "CM NOM" — format courant chez les fournisseurs
+# cuisine/salle de bains (Interbat, BAUS, etc.).
+# Exemple : "C/M MARTINEAU" dans la section lignes de la facture FA131242.
+_CM_RE = re.compile(
+    r'\bC[./]?M\.?\s+([A-ZÀ-Ÿ][A-Za-zÀ-ÿ]{2,}(?:[ \t][A-ZÀ-Ÿ][A-Za-zÀ-ÿ]{2,})*)',
 )
 
 # Nom propre : deux mots ou plus commençant par une majuscule, min 3 chars chacun.
@@ -319,7 +333,7 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
     vendeur = invoice_data.get("vendeur") or {}
     vendor_name = vendeur.get("nom_court") or vendeur.get("nom") or ""
 
-    # ── Priorité 1 : contremarque / chantier explicite dans l'OCR ──────────────
+    # ── Priorité 1 : contremarque / chantier / référence / C/M dans l'OCR ───────
     if ocr_text:
         for m in _CONTREMARQUE_RE.finditer(ocr_text):
             candidate = m.group(1).strip().rstrip(".,;: ")
@@ -327,14 +341,23 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
                 logger.debug("client_final (contremarque) : %s", candidate)
                 return candidate.upper()
 
+        # Format abrégé "C/M NOM" — Interbat et fournisseurs similaires
+        for m in _CM_RE.finditer(ocr_text):
+            candidate = m.group(1).strip()
+            if candidate and not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (C/M) : %s", candidate)
+                return candidate.upper()
+
     # ── Priorité 2 : noms propres dans les lignes de facture ───────────────────
+    # Exige au moins 2 mots après nettoyage pour éviter les noms de gammes produit
+    # qui ressemblent à des prénoms (ex : "Evier Amelia" → "Amelia" seul → rejeté).
     for ligne in (invoice_data.get("lignes") or []):
         desc = (ligne.get("description") or "").strip()
         if not desc:
             continue
         for m in _PROPER_NAME_RE.finditer(desc):
             candidate = _clean_candidate_name(m.group(1).strip())
-            if not candidate:
+            if not candidate or len(candidate.split()) < 2:
                 continue
             if not _is_client_blacklisted(candidate, vendor_name):
                 logger.debug("client_final (ligne) : %s", candidate)
