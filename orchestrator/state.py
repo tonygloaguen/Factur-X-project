@@ -92,14 +92,29 @@ class InvoiceState(TypedDict):
     # log_result lit ce champ pour écrire le bon statut dans SQLite.
     #
     # Valeurs spéciales :
-    #   "rate_limit_429"      → NE PAS marquer dans SQLite (sera retenté)
+    #   "rate_limit_429"          → NE PAS marquer dans SQLite (sera retenté)
+    #   "erreur_transient:<code>" → idem — 503/502/504 Gemini, erreur réseau DNS
     #   str commençant par
-    #   "not_invoice"         → marquer "not_invoice" (skip futur garanti)
-    #   autre chaîne non-vide → marquer "error" dans SQLite
+    #   "not_invoice"             → marquer "not_invoice" (skip futur garanti)
+    #   autre chaîne non-vide     → marquer "error" dans SQLite
     processing_error: str
+
+    # ── Déduplication par nom de fichier (règle "dernière occurrence fait foi") ──
+    # message_id de l'occurrence précédente connue pour ce nom de fichier.
+    # Vide ("") si c'est la première occurrence du fichier.
+    # Utilisé par node_log_result pour marquer l'ancienne entrée comme supersédée
+    # après un succès, assurant que get_latest_by_filename() retourne toujours
+    # la version la plus récente.
+    prior_message_id: str
+
+    # ── Client final (batch 2) ────────────────────────────────────────────────
+    # Calculé par node_normalize_data depuis invoice_data + ocr_text.
+    # Utilisé par node_upload_drive pour le nom du sous-dossier Drive.
+    # Exemple : "GARNIER", "Brigitte_Whitechurch", "A_CLASSER"
+    client_final: str
 
     # ── Services partagés (singletons injectés une seule fois au démarrage) ──
     # Pattern : injection de dépendances via l'état plutôt que variables globales.
     # Avantage : facile à mocker en test (passer un dict avec des faux services).
     services: Any               # Clients Gmail + Drive (OAuth2)
-    state_db: Any          # SQLite : anti-replay + compteur quotas Gemini
+    state_db: Any               # SQLite : anti-replay + compteur quotas Gemini

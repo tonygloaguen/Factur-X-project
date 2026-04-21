@@ -72,6 +72,8 @@ from facturx_utils import (
     build_filename,
     build_folder_name,
     build_supplier_folder_name,
+    build_client_folder_name,
+    is_transient_error,
     GeminiJsonDecodeError,
     MAX_PDF_SIZE_FOR_INVOICE,
 )
@@ -250,10 +252,25 @@ def node_call_gemini(state: InvoiceState) -> dict:
         status = getattr(resp, "status_code", None)
         if status == 429:
             logger.warning("Gemini rate limit (429) — sera retenté au prochain cycle")
-            # NE PAS mettre gemini_used=True : pas marqué dans SQLite → retentable
+            # NE PAS mettre gemini_used=True : non marqué dans SQLite → retentable
             return {"processing_error": "rate_limit_429"}
+        if status in (502, 503, 504):
+            # Erreur transiente Gemini (service unavailable / gateway timeout).
+            # Traitement identique au 429 : NE PAS marquer dans SQLite → retentable.
+            logger.warning(
+                "Gemini service indisponible (%s) — sera retenté au prochain cycle", status
+            )
+            return {"processing_error": f"erreur_transient:{status}"}
         logger.error("Erreur HTTP Gemini (%s)", status)
         return {"gemini_used": True, "processing_error": f"erreur_http_gemini:{status}"}
+
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        # Erreur réseau/DNS (connexion refusée, timeout, résolution DNS échouée).
+        # Transiente : NE PAS marquer dans SQLite → retentable au prochain cycle.
+        logger.warning(
+            "Erreur réseau Gemini (%s) — sera retenté au prochain cycle", type(e).__name__
+        )
+        return {"processing_error": f"erreur_transient:reseau:{type(e).__name__}"}
 
     except Exception as e:
         logger.error("Erreur appel Gemini : %s", e)
@@ -310,7 +327,12 @@ def node_normalize_data(state: InvoiceState) -> dict:
                 "processing_error": "not_invoice_gemini:no_number_no_amount",
             }
 
-        return {"invoice_data": normalized}
+        # Batch 2 : calcul du client final depuis les données normalisées + OCR.
+        # Fait ici (après normalisation) pour bénéficier des defaults vendeur/acheteur.
+        client_folder = build_client_folder_name(normalized, state.get("ocr_text", ""))
+        logger.info("Client final déterminé : '%s'", client_folder)
+
+        return {"invoice_data": normalized, "client_final": client_folder}
 
     except Exception as e:
         logger.error("Erreur normalisation : %s", e)
@@ -416,9 +438,12 @@ def _get_or_create_drive_folder(services: GoogleServices, name: str, parent_id: 
 def node_upload_drive(state: InvoiceState) -> dict:
     """
     Upload le PDF Factur-X sur Google Drive dans la hiérarchie :
-      ROOT / YYYY-MM Mois / Fournisseur / fichier.pdf
+      ROOT / YYYY-MM Mois / ClientFinal / fichier.pdf
 
-    Les sous-dossiers mensuel et fournisseur sont créés à la volée si absents.
+    "ClientFinal" est calculé par node_normalize_data (batch 2).
+    Fallback sur "A_CLASSER" si client_final est vide ou indisponible.
+
+    Les sous-dossiers mensuel et client sont créés à la volée si absents.
     Retourne l'ID Drive et le lien partageable pour l'audit SQLite.
 
     Produit : drive_file_id, drive_file_url
@@ -432,12 +457,14 @@ def node_upload_drive(state: InvoiceState) -> dict:
 
     services: GoogleServices = state["services"]
     month_folder_name = state["invoice_folder"]
-    supplier_folder_name = build_supplier_folder_name(state.get("invoice_data", {}))
+    # Batch 2 : classement par client final (pas fournisseur).
+    # client_final est calculé par node_normalize_data ; fallback A_CLASSER si absent.
+    client_folder_name = state.get("client_final") or "A_CLASSER"
     filename = state["invoice_filename"]
 
     logger.info(
         "[ 7/9 ] upload_drive : upload '%s' → '%s/%s'...",
-        filename, month_folder_name, supplier_folder_name,
+        filename, month_folder_name, client_folder_name,
     )
 
     try:
@@ -445,12 +472,12 @@ def node_upload_drive(state: InvoiceState) -> dict:
         month_id = _get_or_create_drive_folder(services, month_folder_name, DRIVE_FOLDER_ID)
         logger.info("Dossier mensuel : '%s'", month_folder_name)
 
-        # Niveau 2 : sous-dossier fournisseur (ex : "IPSO", "GPDIS")
-        supplier_id = _get_or_create_drive_folder(services, supplier_folder_name, month_id)
-        logger.info("Dossier fournisseur : '%s'", supplier_folder_name)
+        # Niveau 2 : sous-dossier client final (ex : "GARNIER", "Brigitte_Whitechurch")
+        client_id = _get_or_create_drive_folder(services, client_folder_name, month_id)
+        logger.info("Dossier client final : '%s'", client_folder_name)
 
-        # Upload du fichier dans le dossier fournisseur
-        file_meta = {"name": filename, "parents": [supplier_id]}
+        # Upload du fichier dans le dossier client
+        file_meta = {"name": filename, "parents": [client_id]}
         media = MediaIoBaseUpload(
             io.BytesIO(state["facturx_pdf"]),
             mimetype="application/pdf",
@@ -574,15 +601,17 @@ def node_log_result(state: InvoiceState) -> dict:
         logger.info("⏭️  Non-facture : '%s' / %s — %s",
                     state.get("subject", "?")[:50], state["pdf_filename"], error)
 
-    elif error == "rate_limit_429":
-        # Rate limit Gemini : NE PAS marquer dans SQLite → sera retenté
+    elif is_transient_error(error):
+        # Erreur transiente (rate limit, service unavailable, réseau) :
+        # NE PAS marquer dans SQLite — l'email reste sans label "Factures-Traitées"
+        # et sera retenté au prochain cycle de polling.
         logger.warning(
-            "⏱️  Rate limit Gemini — '%s' sera retenté au prochain cycle",
-            state.get("subject", "?")[:50],
+            "⏱️  Erreur transiente (%s) — '%s' sera retenté au prochain cycle",
+            error, state.get("subject", "?")[:50],
         )
 
     elif error:
-        # Autre erreur → marquer "error" (évite de boucler infiniment)
+        # Erreur non-transiente → marquer "error" (évite de boucler infiniment)
         db.mark(
             state["message_id"], state["pdf_filename"],
             "error", detail=error[:200],
@@ -600,15 +629,40 @@ def node_log_result(state: InvoiceState) -> dict:
         numero = inv.get("numero_facture", "?")
         ttc = inv.get("montant_ttc", "?")
         url = state.get("drive_file_url", "?")
+        client = state.get("client_final", "?")
 
         db.mark(
             state["message_id"], state["pdf_filename"],
             "success",
-            detail=f"{vendor} | {numero} | {ttc}€",
+            detail=f"{vendor} | {numero} | {ttc}€ | client:{client}",
             drive_url=url,
         )
 
-        logger.info("✅ Succès : %s | %s | %s€ TTC → %s", vendor, numero, ttc, url)
+        # Règle "dernière occurrence fait foi" :
+        # si un prior_message_id est défini, marquer l'ancienne occurrence comme supersédée.
+        prior_msg_id = state.get("prior_message_id", "")
+        if prior_msg_id and prior_msg_id != state["message_id"]:
+            try:
+                # Audit Drive drift : l'ancienne version reste sur Drive (pas supprimée).
+                # L'URL est loggée pour permettre un nettoyage manuel si nécessaire.
+                old_entry = db.get_entry(prior_msg_id, state["pdf_filename"])
+                if old_entry and old_entry.get("drive_url"):
+                    logger.info(
+                        "Drive drift : ancienne version conservée (nettoyage manuel requis) : %s",
+                        old_entry["drive_url"],
+                    )
+                db.mark_superseded(prior_msg_id, state["pdf_filename"], state["message_id"])
+                logger.info(
+                    "Occurrence supersédée : %s… → %s… (%s)",
+                    prior_msg_id[:12], state["message_id"][:12], state["pdf_filename"],
+                )
+            except Exception as exc:
+                logger.warning("mark_superseded échoué (non bloquant) : %s", exc)
+
+        logger.info(
+            "✅ Succès : %s | %s | %s€ TTC | client: %s → %s",
+            vendor, numero, ttc, client, url,
+        )
 
     return {}  # Nœud terminal : aucun champ à mettre à jour
 

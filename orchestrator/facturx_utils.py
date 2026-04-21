@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime
 
 import requests
@@ -189,12 +190,210 @@ def build_folder_name(inv: dict) -> str:
 def build_supplier_folder_name(inv: dict) -> str:
     """Construit le nom du sous-dossier Drive fournisseur.
 
-    Utilise nom_court en priorité, puis nom. Fallback sur 'Fournisseur_Inconnu'.
+    Utilisé dans le nom de fichier (pas le dossier Drive depuis batch 2).
     Exemple : 'IPSO', 'GPDIS', 'EDF'
     """
     vendeur = inv.get("vendeur", {}) or {}
     name = (vendeur.get("nom_court") or vendeur.get("nom") or "Fournisseur_Inconnu").strip()
     return sanitize_filename(name.replace(" ", "_")) or "Fournisseur_Inconnu"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Client final (batch 2) — extraction heuristique + blacklist
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Entités à NE JAMAIS retenir comme client final.
+# Stockées en clair pour lisibilité ; la comparaison se fait après normalisation.
+CLIENT_FINAL_BLACKLIST: list[str] = [
+    "JMT Déco",
+    "JMT Deco",
+    "Raison Home",
+    "Bénédicte Gloaguen",
+    "Benedicte Gloaguen",
+    "B. Gloaguen",
+]
+
+# Mots usuels du mobilier/bâtiment qui peuvent apparaître capitalisés
+# dans des descriptions mais ne sont PAS des noms de clients.
+_PRODUCT_WORDS: frozenset[str] = frozenset([
+    "cuisine", "cuisines", "meuble", "meubles", "tiroir", "tiroirs",
+    "pose", "livraison", "montage", "installation", "service", "services",
+    "total", "frais", "taxes", "modele", "reference",
+    "article", "produit", "fourniture", "acompte", "solde",
+    "renovation", "travaux", "chantier", "amenagement",
+    # Batch 3: termes supplémentaires bâtiment/cuisine/salle de bain
+    "salle", "bain", "dressing", "placard", "rangement",
+    "electromenager", "electromenagers", "robinetterie",
+    "carrelage", "parquet", "peinture", "electricite",
+    "plomberie", "menuiserie", "maconnerie", "isolation",
+    "baignoire", "douche", "lavabo", "evier", "credence",
+    "quincaillerie", "accessoire", "accessoires",
+])
+
+# Motif pour les champs métier signalant explicitement le client final dans le texte OCR.
+# Priorité maximale : plus fiable que l'acheteur ou les lignes.
+_CONTREMARQUE_RE = re.compile(
+    r'(?:contremarque|chantier|rep[eè]re\s*(?:client)?|ref\.?\s*chantier|'
+    r'client\s*final|destinataire\s*final|dossier\s*client|affaire)\s*[:\-–]\s*'
+    r'([A-Za-zÀ-ÿ0-9][^\n,;|]{1,60})',
+    re.IGNORECASE,
+)
+
+# Nom propre : deux mots ou plus commençant par une majuscule, min 3 chars chacun.
+# Couvre : "Brigitte Whitechurch", "Jean-Paul Dupont", "Marie Leclerc".
+_WORD_CAP = r'[A-ZÀ-ÿ][a-zA-Zà-ÿ]{2,}(?:\-[A-ZÀ-ÿ][a-zA-Zà-ÿ]{2,})*'
+_PROPER_NAME_RE = re.compile(
+    r'\b(' + _WORD_CAP + r'(?:\s+' + _WORD_CAP + r')+)\b'
+)
+
+
+def _normalize_for_cmp(s: str) -> str:
+    """Normalise pour comparaison : minuscules, sans accents, espaces normalisés."""
+    s = unicodedata.normalize("NFD", (s or "").lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _clean_candidate_name(candidate: str) -> str:
+    """Retire les mots-produits en tête et en queue d'un candidat nom propre.
+
+    Évite les faux positifs comme "Pose Cuisine Martin Dupont" → "Martin Dupont".
+    Retourne une chaîne vide si tous les mots sont des mots-produits.
+    """
+    words = candidate.split()
+    while words and _normalize_for_cmp(words[0]) in _PRODUCT_WORDS:
+        words = words[1:]
+    while words and _normalize_for_cmp(words[-1]) in _PRODUCT_WORDS:
+        words = words[:-1]
+    return " ".join(words)
+
+
+def _is_client_blacklisted(name: str, vendor_name: str = "") -> bool:
+    """Retourne True si le nom ne peut pas être un client final valide.
+
+    Vérifie :
+      1. Présence dans CLIENT_FINAL_BLACKLIST (JMT Déco, Raison Home, Bénédicte Gloaguen…)
+      2. Identité avec le fournisseur (acheteur = vendeur → pas un client final)
+      3. Mot produit seul ou trop court
+    """
+    norm = _normalize_for_cmp(name)
+    if not norm or len(norm) < 3:
+        return True
+
+    # Mots produits seuls (ex : "Cuisine Pose" → blacklisté)
+    words = norm.split()
+    if all(w in _PRODUCT_WORDS for w in words):
+        return True
+
+    # Blacklist statique
+    for entry in CLIENT_FINAL_BLACKLIST:
+        bl = _normalize_for_cmp(entry)
+        if bl and (bl in norm or norm in bl):
+            return True
+
+    # Même nom que le fournisseur
+    if vendor_name:
+        vn = _normalize_for_cmp(vendor_name)
+        if vn and (vn in norm or norm in vn):
+            return True
+
+    return False
+
+
+def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
+    """
+    Extrait le client final depuis les données de facture et le texte OCR.
+
+    Ordre de priorité :
+      1. Contremarque / chantier / repère explicite dans l'OCR
+         → signal le plus fiable : "Contremarque : GARNIER" → GARNIER
+      2. Noms propres dans les descriptions de lignes (après filtre blacklist)
+         → "Brigitte Whitechurch" dans lignes BAUS
+      3. acheteur.nom s'il est différent du fournisseur et non blacklisté
+         → cas simple où l'acheteur est le client final réel
+      4. Fallback : "A_CLASSER" si aucune info fiable
+
+    La blacklist exclut : JMT Déco, Raison Home, Bénédicte Gloaguen,
+    le fournisseur lui-même.
+    """
+    vendeur = invoice_data.get("vendeur") or {}
+    vendor_name = vendeur.get("nom_court") or vendeur.get("nom") or ""
+
+    # ── Priorité 1 : contremarque / chantier explicite dans l'OCR ──────────────
+    if ocr_text:
+        for m in _CONTREMARQUE_RE.finditer(ocr_text):
+            candidate = m.group(1).strip().rstrip(".,;: ")
+            if candidate and not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (contremarque) : %s", candidate)
+                return candidate.upper()
+
+    # ── Priorité 2 : noms propres dans les lignes de facture ───────────────────
+    for ligne in (invoice_data.get("lignes") or []):
+        desc = (ligne.get("description") or "").strip()
+        if not desc:
+            continue
+        for m in _PROPER_NAME_RE.finditer(desc):
+            candidate = _clean_candidate_name(m.group(1).strip())
+            if not candidate:
+                continue
+            if not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (ligne) : %s", candidate)
+                return candidate
+
+    # ── Priorité 3 : acheteur.nom si fiable ────────────────────────────────────
+    acheteur = invoice_data.get("acheteur") or {}
+    buyer_name = (acheteur.get("nom_court") or acheteur.get("nom") or "").strip()
+    if buyer_name and not _is_client_blacklisted(buyer_name, vendor_name):
+        logger.debug("client_final (acheteur) : %s", buyer_name)
+        return buyer_name
+
+    # ── Priorité 3b : reference_commande / notes — champs structurés ──────────
+    # Cas IN IPSO : acheteur blacklisté (JMT Déco) mais reference_commande
+    # ou notes peut contenir le client final réel.
+    # Stratégie : d'abord _CONTREMARQUE_RE (ex: "Chantier: GARNIER"),
+    # puis _PROPER_NAME_RE en fallback (ex: "Brigitte Whitechurch").
+    for field_text in [invoice_data.get("reference_commande"), invoice_data.get("notes")]:
+        if not field_text:
+            continue
+        text = str(field_text)
+        for m in _CONTREMARQUE_RE.finditer(text):
+            candidate = m.group(1).strip().rstrip(".,;: ")
+            if candidate and not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (ref/notes contremarque) : %s", candidate)
+                return candidate.upper()
+        for m in _PROPER_NAME_RE.finditer(text):
+            candidate = _clean_candidate_name(m.group(1).strip())
+            if not candidate:
+                continue
+            if not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (ref/notes nom propre) : %s", candidate)
+                return candidate
+
+    # ── Fallback ────────────────────────────────────────────────────────────────
+    logger.debug("client_final : fallback A_CLASSER")
+    return "A_CLASSER"
+
+
+def is_transient_error(error: str) -> bool:
+    """Retourne True si l'erreur est transiente : retriable, ne doit pas être persistée dans SQLite.
+
+    Couvre :
+      - rate_limit_429          : quota Gemini dépassé
+      - erreur_transient:NNN    : HTTP 502/503/504 Gemini
+      - erreur_transient:reseau : ConnectionError / Timeout / DNS
+    """
+    s = error or ""
+    return s == "rate_limit_429" or s.startswith("erreur_transient:")
+
+
+def build_client_folder_name(invoice_data: dict, ocr_text: str = "") -> str:
+    """Retourne le nom de dossier Drive sanitisé pour le client final.
+
+    Espaces → underscores, caractères spéciaux éliminés.
+    Exemple : "GARNIER", "Brigitte_Whitechurch", "A_CLASSER"
+    """
+    client = extract_final_client(invoice_data, ocr_text)
+    return sanitize_filename(client.replace(" ", "_")) or "A_CLASSER"
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -436,7 +635,19 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     last_status = None
     raw_text = None
     for attempt in range(1, max_attempts + 1):
-        resp = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
+        try:
+            resp = requests.post(GEMINI_BASE_URL, headers=_headers, json=payload, timeout=30)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as net_err:
+            # Erreur réseau (DNS, connexion refusée, timeout) → transiente.
+            sleep_s = min(60, base_sleep * (2 ** (attempt - 1))) + attempt * 0.3
+            logger.warning(
+                "Erreur réseau Gemini (%s) — tentative %d/%d, pause %.1fs",
+                type(net_err).__name__, attempt, max_attempts, sleep_s,
+            )
+            if attempt < max_attempts:
+                time.sleep(sleep_s)
+                continue
+            raise  # Dernière tentative : propager vers node_call_gemini
         last_status = resp.status_code
 
         if resp.status_code == 429:
@@ -451,6 +662,18 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
             time.sleep(sleep_s)
             continue
 
+        if resp.status_code in (502, 503, 504):
+            # Erreur transiente côté Gemini (service indisponible, gateway timeout).
+            # Même stratégie que le 429 : backoff exponentiel + retry.
+            # Ces codes NE doivent PAS marquer l'email comme "error" définitif dans SQLite.
+            sleep_s = min(60, base_sleep * (2 ** (attempt - 1))) + attempt * 0.3
+            logger.warning(
+                "Gemini %d (service indisponible) — tentative %d/%d, pause %.1fs",
+                resp.status_code, attempt, max_attempts, sleep_s,
+            )
+            time.sleep(sleep_s)
+            continue
+
         if resp.status_code >= 400:
             logger.error("Erreur HTTP Gemini (%d): %s", resp.status_code, resp.text[:200])
             resp.raise_for_status()
@@ -460,9 +683,11 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
         break  # Réponse HTTP 200 obtenue
 
     else:
-        # Toutes les tentatives ont été des 429
+        # Toutes les tentatives ont échoué sur une erreur transiente (429, 503, 502, 504).
+        # On lève HTTPError avec le dernier status_code pour que node_call_gemini
+        # puisse distinguer l'erreur transiente de l'erreur permanente.
         raise requests.exceptions.HTTPError(
-            f"Gemini rate limit (429) après {max_attempts} tentatives",
+            f"Gemini erreur transiente ({last_status}) après {max_attempts} tentatives",
             response=type("R", (), {"status_code": last_status})(),
         )
 
