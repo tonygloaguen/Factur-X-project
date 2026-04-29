@@ -25,7 +25,8 @@
 8. [Déploiement sur un nouveau poste](#8-déploiement-sur-un-nouveau-poste)
 9. [Commandes utiles et dépannage](#9-commandes-utiles-et-dépannage)
 10. [CI/CD et tests](#10-cicd-et-tests)
-11. [Évolutions futures](#11-évolutions-futures)
+11. [Règles métier — référence](#11-règles-métier--référence)
+12. [Évolutions futures](#12-évolutions-futures)
 
 ---
 
@@ -783,6 +784,21 @@ Le backoff exponentiel est intégré. L'email sera retenté au cycle suivant (ri
 **`DRIVE_FOLDER_ID` incorrect :**
 L'ID est uniquement la chaîne après `/folders/` dans l'URL Drive, sans le `?usp=drive_link`.
 
+**Une facture PDF n'est pas traitée alors qu'elle était en pièce jointe :**
+
+Cause possible : l'attachment est déclaré avec `Content-Type: application/octet-stream` au lieu de `application/pdf`.  
+Certains MUAs (Outlook, relais SMTP) utilisent ce type générique même pour des PDF.
+
+Vérification — regarder le MIME type et le filename dans les logs :
+```
+PJ ignorée (non PDF) : 2026014899.pdf — MIME : application/octet-stream
+```
+
+Comportement attendu après le correctif v2.5 :
+- Si le filename finit par `.pdf` (insensible à la casse), la PJ est acceptée quel que soit le MIME type.
+- `application/octet-stream` + `2026014899.pdf` → traité normalement.
+- `application/octet-stream` + `document.bin` → ignoré (pas de fausse acceptation).
+
 ---
 
 ## 10. CI/CD et tests
@@ -806,7 +822,50 @@ pytest tests/test_facturx_en16931.py -v
 
 ---
 
-## 11. Évolutions futures
+## 11. Règles métier — référence
+
+### Détection des pièces jointes PDF Gmail
+
+Gmail et certains relais SMTP peuvent transmettre un PDF avec `Content-Type: application/octet-stream` au lieu de `application/pdf`.
+
+Le pipeline accepte une pièce jointe si **l'une ou l'autre** condition est vraie :
+
+| Condition | Exemple | Résultat |
+|---|---|---|
+| `mimeType == application/pdf` | `facture.pdf` (Interbat) | ✅ Accepté |
+| filename se termine par `.pdf` (toute casse) | `2026014899.pdf` (Eberhardt) | ✅ Accepté |
+| `application/octet-stream` + filename `.pdf` | `2026014899.pdf` | ✅ Accepté |
+| `application/octet-stream` sans `.pdf` | `document.bin` | ❌ Refusé |
+| autre MIME sans `.pdf` | `notes.txt` | ❌ Refusé |
+
+Fonction : `is_pdf_attachment(part: dict) -> bool` dans `facturx_utils.py`.
+
+### Règle client final — exemples réels
+
+| Fournisseur | Signal OCR | Client final | Priorité |
+|---|---|---|---|
+| Cuisines Morel | `Contremarque : GARNIER` | **GARNIER** | 1 — contremarque |
+| Interbat | `Référence : LEROY` ou `C/M LEROY` | **LEROY** | 1 — C/M |
+| Eberhardt | `86 LEROY 17.03.2026` | **LEROY** | 1 — ligne opérationnelle |
+| BAUS | `Brigitte Whitechurch` (ligne) | **Brigitte Whitechurch** | 2 — nom propre |
+| Armony | relevé LCR, pas de facture | `not_invoice` | filtre local |
+| IN IPSO | acheteur JMT Déco / Raison Home, aucun repère | **A_CLASSER** | fallback |
+
+#### Cas Eberhardt — ligne opérationnelle
+
+Format observé dans l'OCR : `86 LEROY 17.03.2026`  
+Structure : `<numéro_ref> <NOM_CLIENT> <date_livraison>`
+
+La présence d'une date immédiatement après le nom ancre le client entre deux repères structurés, ce qui le rend plus fiable que les noms propres seuls dans les descriptions de lignes.
+
+- `RG 140980 Bamba` → **pas de date après Bamba** → Bamba n'est pas retenu
+- `86 LEROY 17.03.2026` → **date présente** → LEROY retenu comme client final
+
+Entités toujours exclues, même si présentes dans l'OCR : JMT Déco, JMT DECO, Bénédicte Gloaguen, Raison Home, B. Gloaguen.
+
+---
+
+## 12. Évolutions futures
 
 LangGraph permet d'ajouter des nœuds sans modifier les existants :
 

@@ -31,6 +31,7 @@ from google.auth.transport.requests import Request
 from graph import build_graph
 from services import get_google_credentials, GoogleServices, StateDB
 from state import InvoiceState
+from facturx_utils import is_pdf_attachment
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -102,7 +103,7 @@ def _find_pdf_attachments(
         filename = part.get("filename", "")
         mime_type = part.get("mimeType", "")
 
-        if filename.lower().endswith(".pdf") or mime_type == "application/pdf":
+        if is_pdf_attachment(part):
             body = part.get("body", {})
             att_id = body.get("attachmentId")
             if att_id:
