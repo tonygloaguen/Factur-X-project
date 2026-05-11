@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from google.auth.transport.requests import Request
+from googleapiclient.errors import HttpError
 
 from graph import build_graph
 from services import get_google_credentials, GoogleServices, StateDB
@@ -310,6 +311,14 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
                     # Pause entre chaque PDF (throttling Gemini : max 1 appel/15s)
                     time.sleep(MIN_SECONDS_BETWEEN_CALLS)
 
+            except HttpError as e:
+                if e.resp.status == 429:
+                    logger.warning(
+                        "Rate limit API Gmail (429) — cycle interrompu, reprise dans %ds",
+                        POLL_INTERVAL,
+                    )
+                    break
+                logger.error("Erreur traitement email %s : %s", msg_id, e)
             except Exception as e:
                 logger.error("Erreur traitement email %s : %s", msg_id, e)
 
