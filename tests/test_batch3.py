@@ -602,3 +602,80 @@ class TestInterbatFA131242:
         }
         result = extract_final_client(inv, "")
         assert "Whitechurch" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BR-27 : prix_unitaire_ht négatif (RAISON HOME F26-000537, BAUS, EMPC)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBR27NegativePrice:
+    """Règle EN16931 BR-27 : BT-146 (Item net price) ne peut pas être négatif.
+
+    Un avoir ou une remise exprimée en prix négatif viole BR-27.
+    normalize_invoice_data doit inverser pu et qty pour préserver le total.
+    """
+
+    def _normalize(self, lignes):
+        from facturx_utils import normalize_invoice_data
+        inv = {
+            "est_facture": True,
+            "numero_facture": "TEST-001",
+            "date_facture": "2026-04-30",
+            "vendeur": {"nom": "Vendeur Test", "nom_court": "Vendeur"},
+            "acheteur": {"nom": "JMT Déco"},
+            "lignes": lignes,
+            "montant_ht": 0,
+            "montant_tva": 0,
+            "montant_ttc": 0,
+        }
+        return normalize_invoice_data(inv)
+
+    def test_negative_price_flipped_to_positive(self):
+        """prix_unitaire_ht < 0 → flipped to abs(pu), qty negated."""
+        result = self._normalize([
+            {"description": "Royalties", "prix_unitaire_ht": -10.0, "quantite": 2.0, "montant_net_ht": -20.0},
+        ])
+        ligne = result["lignes"][0]
+        assert ligne["prix_unitaire_ht"] >= 0, "BR-27: prix_unitaire_ht doit être ≥ 0"
+        assert ligne["prix_unitaire_ht"] == 10.0
+        assert ligne["quantite"] == -2.0
+
+    def test_line_total_preserved_after_flip(self):
+        """Total de ligne (pu × qty) inchangé après le flip."""
+        result = self._normalize([
+            {"description": "Remise", "prix_unitaire_ht": -50.0, "quantite": 1.0, "montant_net_ht": -50.0},
+        ])
+        ligne = result["lignes"][0]
+        assert ligne["prix_unitaire_ht"] == 50.0
+        assert ligne["quantite"] == -1.0
+        # montant_net_ht est conservé (Gemini l'a fourni, pas recalculé)
+        assert ligne["montant_net_ht"] == -50.0
+
+    def test_positive_price_untouched(self):
+        """Prix positif → inchangé (pas de flip)."""
+        result = self._normalize([
+            {"description": "Prestation", "prix_unitaire_ht": 100.0, "quantite": 3.0, "montant_net_ht": 300.0},
+        ])
+        ligne = result["lignes"][0]
+        assert ligne["prix_unitaire_ht"] == 100.0
+        assert ligne["quantite"] == 3.0
+
+    def test_mixed_lines_only_negative_flipped(self):
+        """Seules les lignes à prix négatif sont flippées, les autres restent intactes."""
+        result = self._normalize([
+            {"description": "Royalties 4%", "prix_unitaire_ht": 400.0, "quantite": 1.0, "montant_net_ht": 400.0},
+            {"description": "Ajustement", "prix_unitaire_ht": -15.0, "quantite": 1.0, "montant_net_ht": -15.0},
+        ])
+        assert result["lignes"][0]["prix_unitaire_ht"] == 400.0
+        assert result["lignes"][0]["quantite"] == 1.0
+        assert result["lignes"][1]["prix_unitaire_ht"] == 15.0
+        assert result["lignes"][1]["quantite"] == -1.0
+
+    def test_zero_price_untouched(self):
+        """Prix nul → inchangé (remise 100% ou SAV)."""
+        result = self._normalize([
+            {"description": "SAV gratuit", "prix_unitaire_ht": 0.0, "quantite": 1.0, "montant_net_ht": 0.0},
+        ])
+        ligne = result["lignes"][0]
+        assert ligne["prix_unitaire_ht"] == 0.0
+        assert ligne["quantite"] == 1.0
