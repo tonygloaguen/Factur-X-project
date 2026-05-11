@@ -869,6 +869,11 @@ def normalize_invoice_data(inv: dict) -> dict:
             pu = _safe_float(line.get("prix_unitaire_ht"))
             qty = _safe_float(line.get("quantite"), 1.0)
             net = _safe_float(line.get("montant_net_ht"))
+            # BR-27 : BT-146 (Item net price) shall NOT be negative.
+            # Prix négatif = avoir/remise : on inverse pu et qty pour préserver le total.
+            if pu < 0:
+                pu = -pu
+                qty = -qty
             # Recalculer si un champ est manquant
             if net == 0.0 and pu > 0:
                 net = round(pu * qty, 2)
