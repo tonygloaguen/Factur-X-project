@@ -679,3 +679,84 @@ class TestBR27NegativePrice:
         ligne = result["lignes"][0]
         assert ligne["prix_unitaire_ht"] == 0.0
         assert ligne["quantite"] == 1.0
+
+
+class TestInterbatFA131485:
+    """
+    Cas réel : Interbat FA131485 — mauvaise classification dans le dossier fournisseur.
+
+    Contexte : PDF deux colonnes — PyMuPDF aligne "Référence :" (colonne gauche) avec
+    l'adresse de livraison "BAUS INT'L (S.N.P.E.C)" (colonne droite) sur la même ligne
+    OCR. _CONTREMARQUE_RE capturait "BAUS INT'L (S.N.P.E.C)" et retournait avant
+    d'atteindre "C/M LEROY" dans le corps de la facture.
+
+    Fix : (1) _CM_RE vérifié EN PREMIER (notation explicite la plus fiable),
+          (2) _CONTREMARQUE_RE rejette les candidats contenant des parenthèses
+              (indicateur d'une forme sociale / adresse, pas d'un client final).
+
+    Attendu : client_final = "LEROY".
+    """
+
+    # OCR simulant l'entrelacement PyMuPDF deux colonnes :
+    # "Référence :" (gauche) + "BAUS INT'L (S.N.P.E.C)" (droite même hauteur).
+    OCR_ENTRELACE = (
+        "interbat CUISINE ET SALLE DE BAINS\n"
+        "Facture FA131485\n"
+        "Réf. Client : 78RAISON1\n"
+        "Référence : BAUS INT'L (S.N.P.E.C)\n"  # entrelacement PyMuPDF
+        "LEROY\n"                                 # valeur réelle colonne gauche
+        "Adresse de facturation\n"
+        "RAISON HOME - JMT DECO\n"
+        "8 ALLEE DU MOULIN DES VASSAUX\n"
+        "78114 MAGNY LES HAMEAUX\n"
+        "Référence    Désignation    Qté    PU Brut    Remise %    PU Net    Montant HT\n"
+        "EVI3531    Cuve Subline B500    1    1234,00\n"
+        "EVI3511    Cuve Subline B400    1    987,00\n"
+        "MIC1132    Mitigeur Cygna Chromé    1    456,00\n"
+        "C/M LEROY\n"
+    )
+
+    INV = {
+        "vendeur": {"nom": "Interbat SAS", "nom_court": "Interbat"},
+        "acheteur": {"nom": "RAISON HOME - JMT DECO", "nom_court": "RAISON HOME"},
+        "lignes": [
+            {"description": "Cuve Subline B500"},
+            {"description": "Cuve Subline B400"},
+            {"description": "Mitigeur Cygna Chromé"},
+            {"description": "C/M LEROY"},
+        ],
+        "reference_commande": "78RAISON1",
+        "notes": None,
+    }
+
+    def test_cm_wins_over_entrelaced_reference(self):
+        """C/M LEROY doit gagner sur 'Référence : BAUS INT'L (S.N.P.E.C)' entrelacé."""
+        from facturx_utils import extract_final_client
+        result = extract_final_client(self.INV, self.OCR_ENTRELACE)
+        assert result == "LEROY", f"Attendu LEROY, obtenu '{result}'"
+
+    def test_baus_not_extracted_when_parentheses(self):
+        """Candidat avec parenthèses '(S.N.P.E.C)' ne doit jamais être retourné."""
+        from facturx_utils import extract_final_client
+        result = extract_final_client(self.INV, self.OCR_ENTRELACE)
+        assert "BAUS" not in result, f"BAUS ne doit pas être le client final, obtenu '{result}'"
+
+    def test_without_cm_parentheses_guard_rejects_baus(self):
+        """Sans 'C/M LEROY', le garde parenthèses rejette BAUS INT'L et tombe sur Priorité 2."""
+        from facturx_utils import extract_final_client
+        ocr_sans_cm = self.OCR_ENTRELACE.replace("C/M LEROY\n", "")
+        result = extract_final_client(self.INV, ocr_sans_cm)
+        # BAUS ne doit pas passer même sans C/M
+        assert "BAUS" not in (result or ""), f"BAUS ne doit pas passer, obtenu '{result}'"
+
+    def test_reference_leroy_without_interleaving(self):
+        """Sans entrelacement PyMuPDF, 'Référence : LEROY' est capturé directement."""
+        from facturx_utils import extract_final_client
+        ocr_propre = (
+            "Facture FA131485\n"
+            "Référence : LEROY\n"
+            "EVI3531    Cuve Subline B500    1\n"
+        )
+        inv = {**self.INV, "lignes": [{"description": "Cuve Subline B500"}]}
+        result = extract_final_client(inv, ocr_propre)
+        assert result == "LEROY", f"Attendu LEROY (OCR propre), obtenu '{result}'"
