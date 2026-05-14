@@ -228,3 +228,133 @@ def test_folder_name_no_special_chars():
     # sanitize_filename retire les caractères interdits dans les noms de fichiers
     assert "/" not in result
     assert "?" not in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cas Eberhardt — ligne opérationnelle "86 LEROY 17.03.2026"
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _eberhardt_ocr() -> str:
+    """OCR minimal représentatif de la facture Eberhardt 2026014899."""
+    return (
+        "JMT DECO\n"
+        "BENEDICTE GLOAGUEN\n"
+        "RG 140980 Bamba\n"
+        "86 LEROY 17.03.2026\n"
+        "FACTURE\n"
+        "N° 14899\n"
+        "montant TTC 713,57 EUR"
+    )
+
+
+def test_eberhardt_client_final_leroy():
+    """Cas Eberhardt : OCR avec '86 LEROY 17.03.2026' → client final LEROY."""
+    result = extract_final_client(
+        _inv(vendor="EBERHARDT", buyer="JMT Déco"),
+        _eberhardt_ocr(),
+    )
+    assert result == "LEROY"
+
+
+def test_eberhardt_not_jmt_deco():
+    """Cas Eberhardt : JMT DECO (OCR + acheteur) ne doit jamais être retenu."""
+    result = extract_final_client(
+        _inv(vendor="EBERHARDT", buyer="JMT Déco"),
+        _eberhardt_ocr(),
+    )
+    assert "JMT" not in result
+    assert "DECO" not in result
+
+
+def test_eberhardt_not_benedicte_gloaguen():
+    """Cas Eberhardt : BENEDICTE GLOAGUEN présente dans l'OCR → jamais retenue."""
+    result = extract_final_client(
+        _inv(vendor="EBERHARDT", buyer="JMT Déco"),
+        _eberhardt_ocr(),
+    )
+    assert "GLOAGUEN" not in result
+    assert "BENEDICTE" not in result
+
+
+def test_eberhardt_not_bamba():
+    """Cas Eberhardt : Bamba visible dans l'OCR mais LEROY disponible → Bamba ne doit pas être retenu."""
+    result = extract_final_client(
+        _inv(vendor="EBERHARDT", buyer="JMT Déco"),
+        _eberhardt_ocr(),
+    )
+    assert result != "BAMBA"
+    assert result == "LEROY"
+
+
+def test_op_line_single_word_client():
+    """Ligne opérationnelle avec client en un seul mot → accepté (LEROY est valide)."""
+    ocr = "42 MARTIN 25.04.2026\nFacture TEST"
+    result = extract_final_client(_inv(vendor="FOURNISSEUR", buyer="JMT Déco"), ocr)
+    assert result == "MARTIN"
+
+
+def test_op_line_two_word_client():
+    """Ligne opérationnelle avec client en deux mots → accepté."""
+    ocr = "12 DUPONT MARTIN 10.01.2026\nFacture"
+    result = extract_final_client(_inv(vendor="FOURNISSEUR", buyer="JMT Déco"), ocr)
+    assert result == "DUPONT MARTIN"
+
+
+def test_op_line_blacklisted_client_skipped():
+    """Ligne opérationnelle avec client blacklisté → ignorée → A_CLASSER."""
+    ocr = "86 JMT DECO 17.03.2026\nFacture 001"
+    result = extract_final_client(_inv(vendor="EBERHARDT", buyer="JMT Déco"), ocr)
+    assert result == "A_CLASSER"
+
+
+def test_op_line_not_matched_without_date():
+    """'RG 140980 Bamba' sans date après → ne doit pas déclencher _OP_LINE_RE."""
+    ocr = "RG 140980 Bamba\nFacture sans date suivante"
+    # Bamba n'a pas de date après lui → pas de match → A_CLASSER (acheteur blacklisté)
+    result = extract_final_client(_inv(vendor="EBERHARDT", buyer="JMT Déco"), ocr)
+    # Le résultat ne doit PAS être BAMBA
+    assert result != "BAMBA"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cas Interbat — Référence : LEROY + C/M LEROY (non-régression)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _interbat_ocr() -> str:
+    """OCR représentatif de la facture Interbat FA131485."""
+    return (
+        "INTERBAT\n"
+        "Facture N°FA131485\n"
+        "Adresse livraison : JMT Déco, 75001 Paris\n"
+        "Référence : LEROY\n"
+        "C/M LEROY\n"
+        "Total HT : 2 400,00 €"
+    )
+
+
+def test_interbat_reference_leroy():
+    """Non-régression Interbat : 'Référence : LEROY' → client final LEROY."""
+    result = extract_final_client(
+        _inv(vendor="INTERBAT", buyer="JMT Déco"),
+        _interbat_ocr(),
+    )
+    assert result == "LEROY"
+
+
+def test_interbat_cm_leroy_fallback():
+    """Non-régression Interbat : 'C/M LEROY' seul (sans Référence) → LEROY."""
+    ocr = "INTERBAT\nFacture FA131485\nC/M LEROY\nTotal HT : 2 400,00 €"
+    result = extract_final_client(
+        _inv(vendor="INTERBAT", buyer="JMT Déco"),
+        ocr,
+    )
+    assert result == "LEROY"
+
+
+def test_interbat_folder_name():
+    """Non-régression Interbat : dossier Drive = 'LEROY'."""
+    result = build_client_folder_name(
+        _inv(vendor="INTERBAT", buyer="JMT Déco"),
+        _interbat_ocr(),
+    )
+    assert result == "LEROY"

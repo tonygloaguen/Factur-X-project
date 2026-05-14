@@ -253,6 +253,18 @@ _CM_RE = re.compile(
     r'\bC[./]?M\.?\s+([A-ZÀ-Ÿ][A-Za-zÀ-ÿ]{2,}(?:[ \t][A-ZÀ-Ÿ][A-Za-zÀ-ÿ]{2,})*)',
 )
 
+# Ligne opérationnelle "86 LEROY 17.03.2026" — format Eberhardt et fournisseurs similaires.
+# Structure : <numéro_ref> <NOM_CLIENT> <date_livraison>.
+# La présence d'une date après le nom ancre le candidat entre deux éléments structurés,
+# ce qui le rend plus fiable que les noms propres seuls dans les lignes de description.
+# Exclut "RG 140980 Bamba" (pas de date immédiatement après Bamba).
+_OP_LINE_RE = re.compile(
+    r'(?:^|[\s\n])\d+\s+'
+    r'([A-ZÀ-Ÿ][A-Za-zÀ-ÿ]{2,}(?:\s+[A-ZÀ-Ÿ][A-Za-zÀ-ÿ]{2,})*)'
+    r'\s+\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?=[\s\n,;|]|$)',
+    re.MULTILINE,
+)
+
 # Nom propre : deux mots ou plus commençant par une majuscule, min 3 chars chacun.
 # Couvre : "Brigitte Whitechurch", "Jean-Paul Dupont", "Marie Leclerc".
 _WORD_CAP = r'[A-ZÀ-ÿ][a-zA-Zà-ÿ]{2,}(?:\-[A-ZÀ-ÿ][a-zA-Zà-ÿ]{2,})*'
@@ -354,6 +366,14 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
                 logger.debug("client_final (contremarque) : %s", candidate)
                 return candidate.upper()
 
+        # Ligne opérationnelle "86 LEROY 17.03.2026" — Eberhardt et fournisseurs similaires
+        # (numéro_ref + NOM_CLIENT + date : la date ancre le client entre deux repères)
+        for m in _OP_LINE_RE.finditer(ocr_text):
+            candidate = m.group(1).strip()
+            if candidate and not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (ligne opérationnelle) : %s", candidate)
+                return candidate.upper()
+
     # ── Priorité 2 : noms propres dans les lignes de facture ───────────────────
     # Exige au moins 2 mots après nettoyage pour éviter les noms de gammes produit
     # qui ressemblent à des prénoms (ex : "Evier Amelia" → "Amelia" seul → rejeté).
@@ -401,6 +421,42 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
     # ── Fallback ────────────────────────────────────────────────────────────────
     logger.debug("client_final : fallback A_CLASSER")
     return "A_CLASSER"
+
+
+def is_pdf_attachment(part: dict) -> bool:
+    """Retourne True si une partie de message Gmail est un PDF à traiter.
+
+    Règles d'acceptation (dans l'ordre) :
+      1. mimeType == "application/pdf"  → accepté quel que soit le filename
+      2. filename se termine par ".pdf" (insensible à la casse) → accepté quel
+         que soit le mimeType (couvre application/octet-stream, etc.)
+      3. Tout autre cas → refusé
+
+    Justification : certains MUAs (Outlook, relais SMTP) déclarent les PDF avec
+    Content-Type: application/octet-stream.  Le filename reste le signal fiable.
+    Un filename absent ou vide ne déclenche pas de crash.
+    """
+    mime_type = part.get("mimeType", "")
+    filename = (part.get("filename") or "").strip()
+
+    if mime_type == "application/pdf":
+        logger.debug("PJ acceptée par MIME application/pdf : %s", filename or "(sans nom)")
+        return True
+
+    if filename.lower().endswith(".pdf"):
+        if mime_type == "application/octet-stream":
+            logger.debug("PJ acceptée par extension .pdf (octet-stream) : %s", filename)
+        else:
+            logger.debug(
+                "PJ acceptée par extension .pdf (MIME : %s) : %s", mime_type or "(vide)", filename
+            )
+        return True
+
+    if filename or mime_type:
+        logger.debug(
+            "PJ ignorée (non PDF) : %s — MIME : %s", filename or "(sans nom)", mime_type or "(vide)"
+        )
+    return False
 
 
 def is_transient_error(error: str) -> bool:
