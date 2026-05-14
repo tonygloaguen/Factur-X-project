@@ -347,17 +347,23 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
 
     # ── Priorité 1 : contremarque / chantier / référence / C/M dans l'OCR ───────
     if ocr_text:
-        for m in _CONTREMARQUE_RE.finditer(ocr_text):
-            candidate = m.group(1).strip().rstrip(".,;: ")
-            if candidate and not _is_client_blacklisted(candidate, vendor_name):
-                logger.debug("client_final (contremarque) : %s", candidate)
-                return candidate.upper()
-
-        # Format abrégé "C/M NOM" — Interbat et fournisseurs similaires
+        # Format abrégé "C/M NOM" testé en premier : notation explicite la plus fiable.
+        # Évite que _CONTREMARQUE_RE capte une adresse de livraison entremêlée par
+        # PyMuPDF avant d'atteindre la ligne "C/M CLIENT" (ex: FA131485 Interbat).
         for m in _CM_RE.finditer(ocr_text):
             candidate = m.group(1).strip()
             if candidate and not _is_client_blacklisted(candidate, vendor_name):
                 logger.debug("client_final (C/M) : %s", candidate)
+                return candidate.upper()
+
+        for m in _CONTREMARQUE_RE.finditer(ocr_text):
+            candidate = m.group(1).strip().rstrip(".,;: ")
+            # Rejeter les captures qui contiennent une forme sociale entre parenthèses
+            # (ex : "BAUS INT'L (S.N.P.E.C)") — indique une adresse, pas un client final.
+            if "(" in candidate or ")" in candidate:
+                continue
+            if candidate and not _is_client_blacklisted(candidate, vendor_name):
+                logger.debug("client_final (contremarque) : %s", candidate)
                 return candidate.upper()
 
         # Ligne opérationnelle "86 LEROY 17.03.2026" — Eberhardt et fournisseurs similaires
