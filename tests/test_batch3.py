@@ -760,3 +760,136 @@ class TestInterbatFA131485:
         inv = {**self.INV, "lignes": [{"description": "Cuve Subline B500"}]}
         result = extract_final_client(inv, ocr_propre)
         assert result == "LEROY", f"Attendu LEROY (OCR propre), obtenu '{result}'"
+
+
+class TestBRAEAutoliquidation:
+    """
+    Cas réel : factures BTP en auto-liquidation de TVA (code AE).
+
+    BR-AE-10 : la ventilation TVA avec CategoryCode='AE' doit contenir
+    ExemptionReason='Autoliquidation' (BT-120) et ExemptionReasonCode='VATEX-EU-AE' (BT-121).
+
+    BR-AE-02 : quand l'acheteur n'a ni SIRET ni TVA intra (absent du PDF),
+    l'env var BUYER_SIRET permet de l'injecter dans normalize_invoice_data.
+
+    Cas réels : F00951.pdf (artisan ARSONNEAU) et Wipoz-Fac-260514332.pdf.
+    """
+
+    BASE_INV = {
+        "numero_facture": "F00951",
+        "date_facture": "2026-05-25",
+        "vendeur": {"nom": "Arsonneau Deco", "nom_court": "Arsonneau", "siret": "12345678901234"},
+        "acheteur": {"nom": "JMT Deco", "siret": None, "tva_intra": None},
+        "lignes": [
+            {
+                "description": "Dépôt et Pose Cuisine Leroy Florence",
+                "quantite": 1.0,
+                "prix_unitaire_ht": 2100.0,
+                "montant_net_ht": 2100.0,
+                "taux_tva": 0.0,
+                "code_tva": "AE",
+            }
+        ],
+        "montant_ht": 2100.0,
+        "montant_tva": 0.0,
+        "montant_ttc": 2100.0,
+        "montant_du": 2100.0,
+    }
+
+    def _normalize(self, inv=None, env_siret=""):
+        import os
+        from facturx_utils import normalize_invoice_data
+        import copy
+        data = copy.deepcopy(inv or self.BASE_INV)
+        old = os.environ.get("BUYER_SIRET")
+        if env_siret:
+            os.environ["BUYER_SIRET"] = env_siret
+        elif "BUYER_SIRET" in os.environ:
+            del os.environ["BUYER_SIRET"]
+        try:
+            return normalize_invoice_data(data)
+        finally:
+            if old is None:
+                os.environ.pop("BUYER_SIRET", None)
+            else:
+                os.environ["BUYER_SIRET"] = old
+
+    def test_buyer_siret_injected_from_env_when_ae_and_missing(self):
+        """BUYER_SIRET injecté si code_tva=AE et acheteur.siret absent."""
+        result = self._normalize(env_siret="88346578900019")
+        assert result["acheteur"]["siret"] == "88346578900019"
+
+    def test_buyer_siret_not_overwritten_if_already_present(self):
+        """BUYER_SIRET ne doit pas écraser un SIRET déjà extrait par Gemini."""
+        import copy
+        inv = copy.deepcopy(self.BASE_INV)
+        inv["acheteur"]["siret"] = "99999999999999"
+        result = self._normalize(inv, env_siret="88346578900019")
+        assert result["acheteur"]["siret"] == "99999999999999"
+
+    def test_buyer_siret_not_injected_for_standard_tva(self):
+        """BUYER_SIRET ne s'injecte pas si aucune ligne n'est en AE."""
+        import copy
+        inv = copy.deepcopy(self.BASE_INV)
+        inv["lignes"][0]["code_tva"] = "S"
+        inv["lignes"][0]["taux_tva"] = 20.0
+        result = self._normalize(inv, env_siret="88346578900019")
+        assert result["acheteur"]["siret"] is None
+
+    def test_buyer_siret_not_injected_when_env_empty(self):
+        """Sans BUYER_SIRET configuré, acheteur.siret reste None pour une facture AE."""
+        result = self._normalize(env_siret="")
+        assert result["acheteur"]["siret"] is None
+
+
+class TestClientFinalCityRejection:
+    """
+    Cas réel : F00951.pdf (FACTURE LEROY VELIZY) — artisan ARSONNEAU.
+
+    'Chantier : MAGNY LES HAMEAUX' dans l'OCR déclenche _CONTREMARQUE_RE et
+    capture la ville (site de pose) au lieu du client final réel.
+
+    Fix : si le candidat capturé == acheteur.ville ou vendeur.ville (normalisé
+    en majuscules), le capture est ignorée et la priorité 2 (noms propres dans
+    les descriptions de lignes) prend le relais → retourne 'Leroy Florence'.
+    """
+
+    OCR = (
+        "ARSONNEAU DECO\n"
+        "Facture F00951\n"
+        "Chantier : MAGNY LES HAMEAUX\n"
+        "Désignation    Qté    PU HT\n"
+        "Dépôt et Pose Cuisine Leroy Florence    1    2100,00\n"
+        "Auto-liquidation TVA\n"
+    )
+
+    INV = {
+        "vendeur": {"nom": "Arsonneau Deco", "nom_court": "Arsonneau", "ville": None},
+        "acheteur": {"nom": "JMT Deco", "nom_court": "JMT Deco", "ville": "Magny Les Hameaux"},
+        "lignes": [{"description": "Dépôt et Pose Cuisine Leroy Florence"}],
+        "reference_commande": None,
+        "notes": None,
+    }
+
+    def test_city_not_returned_as_client_final(self):
+        """'MAGNY LES HAMEAUX' (ville acheteur) ne doit pas être le client final."""
+        from facturx_utils import extract_final_client
+        result = extract_final_client(self.INV, self.OCR)
+        assert "MAGNY" not in (result or ""), f"Ville ne doit pas être client, obtenu '{result}'"
+
+    def test_proper_name_in_ligne_used_as_fallback(self):
+        """Après rejet de la ville, 'Leroy Florence' (ligne) est retourné."""
+        from facturx_utils import extract_final_client
+        result = extract_final_client(self.INV, self.OCR)
+        assert result is not None and result != "A_CLASSER", f"Attendu un nom, obtenu '{result}'"
+
+    def test_chantier_city_with_vendeur_ville_also_rejected(self):
+        """La ville du vendeur est aussi rejetée si elle apparaît dans _CONTREMARQUE_RE."""
+        from facturx_utils import extract_final_client
+        inv = {
+            **self.INV,
+            "vendeur": {**self.INV["vendeur"], "ville": "Magny Les Hameaux"},
+            "acheteur": {**self.INV["acheteur"], "ville": None},
+        }
+        result = extract_final_client(inv, self.OCR)
+        assert "MAGNY" not in (result or ""), f"Ville vendeur ne doit pas être client, obtenu '{result}'"

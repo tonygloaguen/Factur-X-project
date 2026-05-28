@@ -59,6 +59,12 @@ services:
       # ── SQLite (anti-retraitement + suivi quota) ─────────────────────────
       - STATE_DB_PATH=/app/data/state.db
 
+      # ── Auto-liquidation TVA BTP (BR-AE-02) ──────────────────────────────
+      # SIRET de votre société (acheteur) pour les factures en auto-liquidation
+      # quand le fournisseur n'imprime pas votre SIRET sur la facture.
+      # Format : 14 chiffres sans espaces. Laissez vide si non applicable.
+      - BUYER_SIRET=${BUYER_SIRET:-}
+
       # ── Throttling Gemini (tier gratuit) ─────────────────────────────────
       # Max emails traités par cycle de polling
       - MAX_EMAILS_PER_CYCLE=${MAX_EMAILS_PER_CYCLE:-3}

@@ -344,6 +344,16 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
     """
     vendeur = invoice_data.get("vendeur") or {}
     vendor_name = vendeur.get("nom_court") or vendeur.get("nom") or ""
+    # Villes connues dans les données structurées : rejeter si le pattern OCR capture
+    # la ville du chantier plutôt que le client (ex: "Chantier : MAGNY LES HAMEAUX").
+    _known_cities = {
+        v.upper().strip()
+        for v in [
+            (invoice_data.get("acheteur") or {}).get("ville") or "",
+            (invoice_data.get("vendeur") or {}).get("ville") or "",
+        ]
+        if v.strip()
+    }
 
     # ── Priorité 1 : contremarque / chantier / référence / C/M dans l'OCR ───────
     if ocr_text:
@@ -361,6 +371,10 @@ def extract_final_client(invoice_data: dict, ocr_text: str = "") -> str:
             # Rejeter les captures qui contiennent une forme sociale entre parenthèses
             # (ex : "BAUS INT'L (S.N.P.E.C)") — indique une adresse, pas un client final.
             if "(" in candidate or ")" in candidate:
+                continue
+            # Rejeter si le candidat est une ville connue des données structurées
+            # (ex: "Chantier : MAGNY LES HAMEAUX" → ville de livraison, pas un client).
+            if candidate.upper() in _known_cities:
                 continue
             if candidate and not _is_client_blacklisted(candidate, vendor_name):
                 logger.debug("client_final (contremarque) : %s", candidate)
@@ -890,6 +904,23 @@ def normalize_invoice_data(inv: dict) -> dict:
             line["montant_net_ht"] = net
     inv["lignes"] = lignes
 
+    # --- BR-AE-02 : auto-liquidation (AE) exige un identifiant acheteur --------
+    # Les factures BTP en auto-liquidation n'impriment souvent pas le SIRET de
+    # l'acheteur. BUYER_SIRET (env) permet de l'injecter une bonne fois pour
+    # toutes. Format : 14 chiffres sans espaces (SIRET de votre société).
+    _buyer_siret_env = os.environ.get("BUYER_SIRET", "").strip()
+    if _buyer_siret_env:
+        has_ae = any(l.get("code_tva") == "AE" for l in lignes)
+        if has_ae:
+            acheteur = inv.get("acheteur") or {}
+            if not acheteur.get("siret") and not acheteur.get("tva_intra"):
+                acheteur["siret"] = _buyer_siret_env
+                inv["acheteur"] = acheteur
+                logger.info(
+                    "BR-AE-02 : SIRET acheteur absent → injecté depuis BUYER_SIRET (%s)",
+                    _buyer_siret_env,
+                )
+
     # --- Ventilation TVA (BG-23) : calculer si absente ---
     if not inv.get("ventilation_tva"):
         tva_map: dict[tuple[str, float], dict] = {}
@@ -1100,11 +1131,18 @@ def generate_facturx_xml_en16931(inv: dict) -> bytes:
 
     # Ventilation TVA (BG-23) — DOIT être avant SpecifiedTradePaymentTerms (ordre XSD)
     for vat_break in inv.get("ventilation_tva", []):
+        vat_code = str(vat_break.get("code_tva", "S"))
         tax_el = etree.SubElement(settle_h, _el("ram", "ApplicableTradeTax"))
         etree.SubElement(tax_el, _el("ram", "CalculatedAmount")).text = f"{_safe_float(vat_break.get('montant_tva')):.2f}"
         etree.SubElement(tax_el, _el("ram", "TypeCode")).text = "VAT"
+        # BR-AE-10 : ExemptionReason (BT-120) — position XSD : après TypeCode
+        if vat_code == "AE":
+            etree.SubElement(tax_el, _el("ram", "ExemptionReason")).text = "Autoliquidation"
         etree.SubElement(tax_el, _el("ram", "BasisAmount")).text = f"{_safe_float(vat_break.get('base_ht')):.2f}"
-        etree.SubElement(tax_el, _el("ram", "CategoryCode")).text = str(vat_break.get("code_tva", "S"))
+        etree.SubElement(tax_el, _el("ram", "CategoryCode")).text = vat_code
+        # BR-AE-10 : ExemptionReasonCode (BT-121) — position XSD : après CategoryCode
+        if vat_code == "AE":
+            etree.SubElement(tax_el, _el("ram", "ExemptionReasonCode")).text = "VATEX-EU-AE"
         etree.SubElement(tax_el, _el("ram", "RateApplicablePercent")).text = f"{_safe_float(vat_break.get('taux')):.2f}"
 
     # Échéance de paiement (BT-9) — APRÈS ApplicableTradeTax
