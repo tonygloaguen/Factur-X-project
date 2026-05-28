@@ -70,6 +70,33 @@ if isinstance(getattr(langgraph.graph, "StateGraph", None), MagicMock) or not ha
     langgraph.graph.StateGraph = MagicMock()
     langgraph.graph.END = "END"
 
+# ── requests (appels Gemini) -------------------------------------------------
+_stub_if_missing("requests")
+# requests.exceptions doit exister comme module avec ConnectionError et Timeout
+import requests  # noqa: E402
+if isinstance(requests, MagicMock) or not hasattr(requests, "exceptions"):
+    exc_mock = MagicMock()
+    exc_mock.ConnectionError = type("ConnectionError", (Exception,), {})
+    exc_mock.Timeout = type("Timeout", (Exception,), {})
+
+    class _HTTPError(Exception):
+        def __init__(self, *args, response=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.response = response
+
+    exc_mock.HTTPError = _HTTPError
+    requests.exceptions = exc_mock
+    sys.modules["requests.exceptions"] = exc_mock
+
+# ── Pydantic (schemas.py) ---------------------------------------------------
+_stub_if_missing("pydantic")
+import pydantic  # noqa: E402
+if isinstance(pydantic, MagicMock) or not hasattr(pydantic, "ValidationError"):
+    pydantic.ValidationError = type("ValidationError", (Exception,), {})
+    pydantic.BaseModel = MagicMock()
+    pydantic.Field = MagicMock()
+    sys.modules["pydantic"] = pydantic
+
 # ── Bibliothèques PDF/XML lourdes --------------------------------------------
 # Stubifiées UNIQUEMENT si absentes — le test_facturx_en16931.py utilise
 # les vraies (fitz, lxml, facturx) quand elles sont installées en CI.
