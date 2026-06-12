@@ -105,11 +105,13 @@ DENY_SOFT_KEYWORDS = [
 ]
 
 # Taille maximale du texte extrait pour être candidat facture.
-# Au-delà de 30 000 caractères, le document est quasi-certainement un
+# Au-delà de 60 000 caractères, le document est quasi-certainement un
 # catalogue/tarif (ex : TARIF IN-IPSO 2026 : 382 000 chars, 200+ pages).
 # Note : 15 000 était trop restrictif pour les factures détaillées multi-pages
 # (ex : IPSO FAC0042658 sur 5 pages avec de nombreuses lignes d'aménagement).
-MAX_TEXT_LEN_FOR_INVOICE = 30_000
+# Note : 30 000 rejetait encore de vraies factures très détaillées
+# (ex : RAISON HOME F2026-044 sur 19 pages : 34 228 chars, 22 035 € TTC).
+MAX_TEXT_LEN_FOR_INVOICE = 60_000
 
 # Taille maximale du fichier PDF pour être candidat facture (5 Mo).
 MAX_PDF_SIZE_FOR_INVOICE = 5_000_000
@@ -683,6 +685,33 @@ def _extract_response_text(response_data: dict) -> str:
     return target["text"]
 
 
+# Budget de caractères du texte OCR envoyé à Gemini (limite le coût en tokens).
+# Sur les factures longues, les totaux/TVA/paiements sont en DERNIÈRES pages :
+# une troncature [:N] naïve les coupe (ex : RAISON HOME F2026-044, 19 pages,
+# 34 228 chars — "Total affaire TTC" en position ~31 400). On envoie donc
+# tête + queue pour préserver à la fois l'en-tête (n°, date, parties) et les totaux.
+GEMINI_OCR_HEAD_CHARS = 6_000
+GEMINI_OCR_TAIL_CHARS = 4_000
+
+
+def _truncate_ocr_for_gemini(ocr_text: str) -> str:
+    """Tronque le texte OCR en préservant le début ET la fin du document.
+
+    - Texte court (≤ head+tail) : renvoyé intact.
+    - Texte long : head + marqueur de coupure + tail, pour que Gemini voie
+      l'en-tête (numéro, date, fournisseur, client) et les totaux finaux.
+    """
+    text = ocr_text or ""
+    limit = GEMINI_OCR_HEAD_CHARS + GEMINI_OCR_TAIL_CHARS
+    if len(text) <= limit:
+        return text
+    return (
+        text[:GEMINI_OCR_HEAD_CHARS]
+        + "\n\n[... document tronqué : pages intermédiaires omises ...]\n\n"
+        + text[-GEMINI_OCR_TAIL_CHARS:]
+    )
+
+
 def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     """
     Appelle l'API Gemini pour extraire les données structurées d'une facture.
@@ -703,7 +732,7 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY non configurée dans les variables d'environnement")
 
-    user_message = f"Texte OCR de la facture :\n\n{(ocr_text or '')[:8000]}"
+    user_message = f"Texte OCR de la facture :\n\n{_truncate_ocr_for_gemini(ocr_text)}"
     if email_context:
         user_message += f"\n\nContexte email :\n{email_context[:2000]}"
 
