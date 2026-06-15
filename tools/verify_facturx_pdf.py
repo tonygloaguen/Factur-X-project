@@ -62,10 +62,10 @@ def main() -> int:
         print(f"ERREUR - lecture du PDF impossible : {exc}", file=sys.stderr)
         return 2
 
+    # (None, None) n'est JAMAIS une validation réussie : c'est l'absence de XML.
     if not xml_filename or not xml_bytes:
         print(
-            "ECHEC - aucun XML Factur-X trouvé dans le PDF "
-            f"(pas un PDF Factur-X ?) : {pdf_path}",
+            f"ECHEC - PDF sans XML Factur-X embarqué : {pdf_path}",
             file=sys.stderr,
         )
         return 3
@@ -74,7 +74,7 @@ def main() -> int:
     try:
         facturx.xml_check_xsd(xml_bytes, flavor="factur-x", level="en16931")
     except Exception as exc:  # noqa: BLE001
-        print(f"ECHEC - XML non valide contre le XSD : {exc}", file=sys.stderr)
+        print(f"ECHEC - XSD invalid : {exc}", file=sys.stderr)
         return 5
 
     # 3) Validation schematron officielle (lève si invalide) — Saxon/saxonche.
@@ -84,13 +84,13 @@ def main() -> int:
         message = str(exc)
         if "BR-CO-25" in message:
             print(
-                "ECHEC - schematron BR-CO-25 : montant dû positif sans échéance "
-                "(BT-9) ni conditions de paiement (BT-20).",
+                "ECHEC - Schematron invalid (BR-CO-25) : montant dû positif sans "
+                "échéance (BT-9) ni conditions de paiement (BT-20).",
                 file=sys.stderr,
             )
             print(message, file=sys.stderr)
             return 4
-        print(f"ECHEC - XML non valide contre le schematron : {message}", file=sys.stderr)
+        print(f"ECHEC - Schematron invalid : {message}", file=sys.stderr)
         return 5
 
     print("OK - PDF Factur-X valide XSD + schematron")
