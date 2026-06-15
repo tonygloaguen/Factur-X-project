@@ -106,10 +106,13 @@ def _run_tool(pdf_path: str) -> subprocess.CompletedProcess:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_schematron_raises_br_co_25_on_missing_bt9_bt20():
-    """xml_check_schematron DOIT lever BR-CO-25 sur un XML sans BT-9 ni BT-20."""
+    """xml_check_schematron DOIT lever sur un XML sans BT-9 ni BT-20,
+    avec 'BR-CO-25' explicitement présent dans le message d'erreur."""
     xml = _br_co_25_invalid_xml()
-    with pytest.raises(Exception, match="BR-CO-25"):
+    with pytest.raises(Exception) as excinfo:
         facturx.xml_check_schematron(xml, flavor="factur-x", level="en16931")
+    # Le motif BR-CO-25 doit être visible dans le message de l'exception levée.
+    assert "BR-CO-25" in str(excinfo.value)
 
 
 def test_none_none_extraction_is_not_success():

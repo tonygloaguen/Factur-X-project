@@ -12,12 +12,13 @@ le chemin local du PDF Factur-X généré (à récupérer depuis Drive ou le ser
 Usage :
     python3 tools/verify_facturx_pdf.py /chemin/vers/facture.pdf
 
-Codes de sortie :
-    0 → OK (XSD + schematron valides)
-    2 → fichier introuvable / illisible
-    3 → aucun XML Factur-X trouvé dans le PDF
-    4 → schematron rejette BR-CO-25 (montant dû positif sans BT-9 ni BT-20)
-    5 → autre échec de validation XSD ou schematron
+Codes de sortie (un code distinct par cas) :
+    0 → OK : PDF Factur-X valide XSD + schematron
+    2 → PDF inexistant / chemin invalide / illisible (ou lib absente)
+    3 → PDF sans XML Factur-X embarqué
+    4 → schematron invalide AVEC BR-CO-25 (montant dû positif sans BT-9 ni BT-20)
+    5 → XML extrait mais XSD invalide
+    6 → XML extrait mais schematron invalide (autre que BR-CO-25)
 
 Aucune dépendance au reste du projet : seul ``factur-x`` est requis
 (présent dans requirements-ci.txt et dans l'image du conteneur).
@@ -91,7 +92,7 @@ def main() -> int:
             print(message, file=sys.stderr)
             return 4
         print(f"ECHEC - Schematron invalid : {message}", file=sys.stderr)
-        return 5
+        return 6
 
     print("OK - PDF Factur-X valide XSD + schematron")
     print(f"     fichier   : {pdf_path}")
