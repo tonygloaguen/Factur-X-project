@@ -506,6 +506,48 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
+#: Conditions de paiement (BT-20) par défaut quand le montant dû est positif
+#: mais qu'aucune échéance (BT-9) ni condition n'est extraite (cf. BR-CO-25).
+DEFAULT_PAYMENT_TERMS = "Paiement à réception de facture"
+#: Conditions de paiement (BT-20) pour une facture déjà réglée.
+PAID_PAYMENT_TERMS = "Facture acquittée"
+
+#: Indices texte fiables d'une facture acquittée / payée / soldée.
+#: Volontairement conservateur (expressions sans ambiguïté) pour éviter de
+#: marquer payée une facture qui décrit seulement ses modalités de paiement.
+_PAID_INVOICE_MARKERS: tuple[str, ...] = (
+    "facture acquittée", "facture acquittee",
+    "facture payée", "facture payee",
+    "facture réglée", "facture reglee",
+    "facture soldée", "facture soldee",
+    "acquittée le", "acquittee le",
+    "payée le", "payee le",
+    "réglée le", "reglee le",
+    "déjà réglé", "deja regle",
+    "déjà payé", "deja paye",
+    "solde nul", "solde : 0", "reste à payer : 0", "reste a payer : 0",
+)
+
+
+def _is_invoice_paid(inv: dict) -> bool:
+    """Détecte si la facture porte des indices fiables de règlement (acquittée).
+
+    Sources, par ordre de fiabilité :
+      1. ``mention_acquittee`` : booléen explicite extrait par Gemini.
+      2. Recherche d'expressions sans ambiguïté dans ``conditions_paiement``
+         et ``notes`` (texte libre de la facture).
+
+    Returns:
+        True si la facture est manifestement déjà payée, False sinon.
+    """
+    if inv.get("mention_acquittee") is True:
+        return True
+    haystack = " ".join(
+        str(inv.get(field) or "") for field in ("conditions_paiement", "notes")
+    ).lower()
+    return any(marker in haystack for marker in _PAID_INVOICE_MARKERS)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) Extraction texte PDF (natif + OCR si besoin)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -613,6 +655,8 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
 
   "reference_commande": "string ou null",
   "code_moyen_paiement": "30 pour virement, 58 pour SEPA, 48 pour carte, null si inconnu",
+  "conditions_paiement": "Conditions de règlement telles qu'écrites sur la facture (ex: 'Paiement à 30 jours', 'Paiement à réception') ou null",
+  "mention_acquittee": false,
   "iban": "string ou null",
   "bic": "string ou null",
   "notes": "informations complémentaires ou null"
@@ -631,7 +675,9 @@ Règles CRITIQUES :
 - Si tu ne peux pas identifier les lignes, crée UNE SEULE ligne "Prestation globale"
 - Pour chaque ligne : prix_unitaire_ht * quantite doit = montant_net_ht
 - La ventilation_tva regroupe les lignes par taux de TVA
-- montant_du = montant restant à payer (= montant_ttc si pas d'acompte)
+- montant_du = montant restant à payer (= montant_ttc si pas d'acompte ; 0 si la facture est déjà réglée)
+- conditions_paiement = recopie EXACTE de la mention de règlement présente sur la facture, sinon null (ne l'invente pas)
+- mention_acquittee = true UNIQUEMENT si la facture indique clairement qu'elle est déjà payée/acquittée/réglée/soldée
 - pays_code TOUJOURS en 2 lettres ISO (FR, DE, BE, CH...). Défaut "FR"
 - Un accusé de réception, un bon de livraison, un devis, une offre commerciale, une confirmation de commande ou tout document qui n'est PAS une demande de paiement → retourne "est_facture": false
 """
@@ -987,7 +1033,33 @@ def normalize_invoice_data(inv: dict) -> dict:
     inv["montant_ht"] = ht
     inv["montant_tva"] = tva
     inv["montant_ttc"] = ttc
-    inv["montant_du"] = _safe_float(inv.get("montant_du")) or ttc
+
+    # --- Montant dû (BT-115) + conditions de paiement (BT-20) : BR-CO-25 ------
+    # BR-CO-25 : si le montant dû (BT-115) est positif, le XML DOIT contenir
+    # soit une échéance (BT-9, date_echeance), soit des conditions de paiement
+    # (BT-20, conditions_paiement). Sinon la validation schematron échoue.
+    acquittee = _is_invoice_paid(inv)
+    montant_du_brut = _safe_float(inv.get("montant_du"))
+    if montant_du_brut > 0:
+        # Reste à payer explicite et positif → on le conserve tel quel,
+        # même si la facture porte une mention d'acquittement contradictoire.
+        du = montant_du_brut
+    elif acquittee:
+        # Facture acquittée et aucun reste à payer positif → solde nul cohérent.
+        du = 0.0
+    else:
+        # Cas normal (pas d'acompte ni de paiement) : dû = TTC.
+        du = ttc
+    inv["montant_du"] = du
+
+    date_ech = inv.get("date_echeance")
+    conditions = (inv.get("conditions_paiement") or "").strip()
+    if du > 0 and not date_ech and not conditions:
+        # Fallback BR-CO-25 : garantir BT-20 quand BT-9 et BT-20 sont absents.
+        conditions = DEFAULT_PAYMENT_TERMS
+    elif acquittee and du == 0.0 and not conditions:
+        conditions = PAID_PAYMENT_TERMS
+    inv["conditions_paiement"] = conditions or None
 
     # --- Divers ---
     inv.setdefault("devise", "EUR")
@@ -1174,25 +1246,39 @@ def generate_facturx_xml_en16931(inv: dict) -> bytes:
             etree.SubElement(tax_el, _el("ram", "ExemptionReasonCode")).text = "VATEX-EU-AE"
         etree.SubElement(tax_el, _el("ram", "RateApplicablePercent")).text = f"{_safe_float(vat_break.get('taux')):.2f}"
 
-    # Échéance de paiement (BT-9) — APRÈS ApplicableTradeTax
+    # Conditions (BT-20) + échéance (BT-9) de paiement — APRÈS ApplicableTradeTax.
+    # BR-CO-25 : si DuePayableAmount (BT-115) > 0, au moins l'un des deux doit
+    # être présent. Ordre XSD CII : Description (BT-20) AVANT DueDateDateTime (BT-9).
     date_ech = inv.get("date_echeance")
-    if date_ech:
+    conditions = (inv.get("conditions_paiement") or "").strip()
+    if conditions or date_ech:
         pt = etree.SubElement(settle_h, _el("ram", "SpecifiedTradePaymentTerms"))
-        due_dt = etree.SubElement(pt, _el("ram", "DueDateDateTime"))
-        etree.SubElement(due_dt, _el("udt", "DateTimeString"), format="102").text = date_ech.replace("-", "")
+        if conditions:
+            etree.SubElement(pt, _el("ram", "Description")).text = conditions
+        if date_ech:
+            due_dt = etree.SubElement(pt, _el("ram", "DueDateDateTime"))
+            etree.SubElement(due_dt, _el("udt", "DateTimeString"), format="102").text = date_ech.replace("-", "")
 
     # Totaux monétaires (BG-22)
     summ = etree.SubElement(settle_h, _el("ram", "SpecifiedTradeSettlementHeaderMonetarySummation"))
     ht = _safe_float(inv.get("montant_ht"))
     tva_total = _safe_float(inv.get("montant_tva"))
     ttc = _safe_float(inv.get("montant_ttc"))
-    du = _safe_float(inv.get("montant_du")) or ttc
+    # Respecter un montant dû explicite (y compris 0 pour une facture acquittée).
+    # Fallback sur le TTC uniquement si le champ est totalement absent.
+    du = _safe_float(inv.get("montant_du")) if inv.get("montant_du") is not None else ttc
     sum_lines_net = _safe_float(inv.get("montant_total_lignes_net")) or ht
+    # BT-113 (TotalPrepaidAmount) : part déjà payée (acompte ou facture acquittée).
+    # BR-CO-16 : DuePayableAmount = GrandTotalAmount − TotalPrepaidAmount.
+    # Sans ce poste, un montant dû < TTC violerait BR-CO-16.
+    prepaid = round(ttc - du, 2)
 
     etree.SubElement(summ, _el("ram", "LineTotalAmount")).text = f"{sum_lines_net:.2f}"
     etree.SubElement(summ, _el("ram", "TaxBasisTotalAmount")).text = f"{ht:.2f}"
     etree.SubElement(summ, _el("ram", "TaxTotalAmount"), currencyID=devise).text = f"{tva_total:.2f}"
     etree.SubElement(summ, _el("ram", "GrandTotalAmount")).text = f"{ttc:.2f}"
+    if prepaid > 0.005:
+        etree.SubElement(summ, _el("ram", "TotalPrepaidAmount")).text = f"{prepaid:.2f}"
     etree.SubElement(summ, _el("ram", "DuePayableAmount")).text = f"{du:.2f}"
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)

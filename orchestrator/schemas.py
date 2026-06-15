@@ -75,6 +75,8 @@ class GeminiInvoiceOutput(BaseModel):
     montant_ttc: float = 0.0
     montant_du: float = 0.0
     montant_total_lignes_net: float = 0.0
+    conditions_paiement: Optional[str] = None  # BT-20 (cf. BR-CO-25)
+    mention_acquittee: bool = False
     lignes: list = []
 
     @field_validator(
@@ -89,7 +91,7 @@ class GeminiInvoiceOutput(BaseModel):
         except (TypeError, ValueError):
             return 0.0
 
-    @field_validator("est_facture", mode="before")
+    @field_validator("est_facture", "mention_acquittee", mode="before")
     @classmethod
     def _coerce_bool(cls, v: Any) -> bool:
         if isinstance(v, bool):
