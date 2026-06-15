@@ -54,12 +54,16 @@ jobs:
           GEMINI_API_KEY: dummy-not-called-in-unit-tests
         run: |
           # Tests Factur-X qui n'ont pas besoin de pydantic (absent de
-          # requirements-ci.txt) : embedding EN16931 + règles BR-CO-25/BR-CO-16.
-          # Avec lxml/facturx réels, les tests XML de test_br_co_25.py
-          # s'exécutent (ne sont plus skippés comme en env local léger).
+          # requirements-ci.txt) :
+          #  - test_facturx_en16931 : embedding EN16931
+          #  - test_br_co_25        : règles BR-CO-25/BR-CO-16 (structure XML)
+          #  - test_facturx_schematron : validation OFFICIELLE XSD + schematron
+          #    (factur-x + saxonche) sur XML seul ET PDF embarqué.
+          # Avec lxml/facturx réels, ces tests s'exécutent (≠ skip en local léger).
           PYTHONPATH=orchestrator pytest \
             tests/test_facturx_en16931.py \
             tests/test_br_co_25.py \
+            tests/test_facturx_schematron.py \
             -v
 
       - name: Validate embedded Factur-X XML (PDFs dans le repo)
