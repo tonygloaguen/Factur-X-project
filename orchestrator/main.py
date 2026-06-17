@@ -358,11 +358,25 @@ def main():
     if stats:
         logger.info("Historique existant : %s", " | ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
-    # Authentification Google OAuth2
+    # Authentification Google OAuth2 (avec retry illimité : une coupure réseau
+    # prolongée, ex. Wi-Fi coupé une partie de la nuit, ne doit pas tuer le
+    # processus — il doit patienter et reprendre seul dès que ça revient).
     logger.info("Connexion à Google...")
-    creds = get_google_credentials()
-    services = GoogleServices(creds)
-    logger.info("Connexion Google : OK")
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            creds = get_google_credentials()
+            services = GoogleServices(creds)
+            break
+        except Exception as e:
+            sleep_s = min(600, 10 * 2 ** (attempt - 1))  # backoff exponentiel, plafonné à 10 min
+            logger.warning(
+                "Connexion Google échouée (tentative %d) : %s — nouvelle tentative dans %ds...",
+                attempt, e, sleep_s,
+            )
+            time.sleep(sleep_s)
+    logger.info("Connexion Google : OK (après %d tentative(s))", attempt)
 
     # Compiler le graphe LangGraph
     # build_graph() construit le StateGraph et le compile en CompiledStateGraph
