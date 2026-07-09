@@ -16,8 +16,16 @@ PyMuPDF>=1.24
 # PDF — manipulation (injection OutputIntent + XMP pour PDF/A-3b)
 pypdf>=4.0
 
-# Factur-X — embedding XML dans PDF, validation XSD (norme EN 16931)
-factur-x>=3.10
+# Factur-X — embedding XML dans PDF, validation XSD + schematron (EN 16931).
+# Borne <5 IMPÉRATIVE : factur-x >=5.0 délègue le schematron à un serveur Saxon
+# HTTP externe (localhost:5000) et l'ignore silencieusement s'il est absent —
+# la validation officielle deviendrait un no-op en CI (les contrôles négatifs
+# ne lèveraient plus). Les versions 4.x valident en-process via saxonche.
+factur-x>=4.0,<5
+
+# saxonche — moteur Saxon HE en-process requis par factur-x 4.x pour rejouer
+# le schematron officiel EN16931 (référencé par les tests, jusqu'ici absent).
+saxonche>=12.4
 
 # XML — génération CII D16B/D22B avec namespaces
 lxml>=5.0
