@@ -59,6 +59,12 @@ services:
       # ── SQLite (anti-retraitement + suivi quota) ─────────────────────────
       - STATE_DB_PATH=/app/data/state.db
 
+      # ── Registre fournisseurs (identité émetteur + classement GDrive) ────
+      # Seed en lecture seule (monté ci-dessous), registre vivant persistant
+      # dans le volume /app/data (réécrit atomiquement, enrichi au fil de l'eau).
+      - SUPPLIERS_REGISTRY_SEED=/app/suppliers_registry.seed.json
+      - SUPPLIERS_REGISTRY_PATH=/app/data/suppliers_registry.json
+
       # ── Auto-liquidation TVA BTP (BR-AE-02) ──────────────────────────────
       # SIRET de votre société (acheteur) pour les factures en auto-liquidation
       # quand le fournisseur n'imprime pas votre SIRET sur la facture.
@@ -78,7 +84,10 @@ services:
       - ./orchestrator/credentials.json:/app/credentials.json:ro
       # Token OAuth2 (généré automatiquement à la première connexion)
       - ./orchestrator/token.json:/app/token.json
-      # Volume persistant pour la base SQLite (survit aux redémarrages)
+      # Seed du registre fournisseurs (lecture seule ; le registre vivant est
+      # matérialisé dans /app/data au premier démarrage).
+      - ./suppliers_registry.seed.json:/app/suppliers_registry.seed.json:ro
+      # Volume persistant pour la base SQLite + registre (survit aux redémarrages)
       - ./orchestrator_data:/app/data
 
     restart: unless-stopped
