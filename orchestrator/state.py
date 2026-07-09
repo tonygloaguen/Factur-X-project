@@ -118,3 +118,4 @@ class InvoiceState(TypedDict):
     # Avantage : facile à mocker en test (passer un dict avec des faux services).
     services: Any               # Clients Gmail + Drive (OAuth2)
     state_db: Any               # SQLite : anti-replay + compteur quotas Gemini
+    registry: Any               # SupplierRegistry : identité fournisseur + classement

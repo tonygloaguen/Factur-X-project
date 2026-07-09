@@ -54,11 +54,13 @@ import logging
 import os
 import re
 from datetime import datetime
+from typing import Optional
 
 import requests
 from googleapiclient.http import MediaIoBaseUpload
 
 from pydantic import ValidationError
+from classify import classify
 from schemas import GeminiInvoiceOutput, InvoiceExtracted
 from state import InvoiceState
 from services import GoogleServices, StateDB
@@ -426,6 +428,60 @@ def node_embed_facturx(state: InvoiceState) -> dict:
 # Nœud 7 : upload_drive — Upload sur Google Drive
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _escape_drive_query(value: str) -> str:
+    """Échappe les apostrophes et antislashs pour une requête Drive `name = '...'`."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _find_drive_file(services: GoogleServices, name: str, parent_id: str) -> Optional[dict]:
+    """Retourne le premier fichier (non-dossier) nommé ``name`` dans ``parent_id``, sinon None."""
+    query = (
+        f"name = '{_escape_drive_query(name)}' and '{parent_id}' in parents "
+        f"and mimeType != 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    results = (
+        services.drive.files()
+        .list(q=query, spaces="drive", fields="files(id, name, webViewLink)")
+        .execute()
+    )
+    files = results.get("files", [])
+    return files[0] if files else None
+
+
+def _learn_emitter_from_invoice(registry, inv: dict) -> Optional[str]:
+    """Apprend l'émetteur inconnu depuis la partie NON-self de la facture.
+
+    Le vrai émetteur est la partie (vendeur ou acheteur) dont l'identifiant fort
+    n'est pas celui de ``self`` (piège Häcker : l'en-tête peut mettre JMT en
+    vendeur). Construit une entrée de registre depuis cette partie et l'ajoute.
+
+    Returns:
+        Le nom canonique appris, ou None si aucune partie tierce identifiable.
+    """
+    from supplier_registry import normalize_digits, normalize_vat
+
+    self_vats = registry.self_vats
+    self_sirets = registry.self_sirets
+    for key in ("vendeur", "acheteur"):
+        party = inv.get(key) or {}
+        vat = normalize_vat(str(party.get("tva_intra") or ""))
+        siret = normalize_digits(str(party.get("siret") or ""))
+        is_non_self = (vat and vat not in self_vats) or (len(siret) == 14 and siret not in self_sirets)
+        if not is_non_self:
+            continue
+        learned = {
+            "legal_name": party.get("nom") or party.get("nom_court") or "",
+            "brand": party.get("nom_court") or "",
+            "vat": [vat] if vat else [],
+            "siret": [siret] if len(siret) == 14 else [],
+            "country": party.get("pays_code") or "FR",
+        }
+        if not learned["legal_name"] and not learned["vat"] and not learned["siret"]:
+            continue
+        return registry.learn(learned)
+    return None
+
+
 def _get_or_create_drive_folder(services: GoogleServices, name: str, parent_id: str) -> str:
     """Cherche ou crée un dossier Drive par nom sous un parent donné. Retourne l'ID."""
     query = (
@@ -473,28 +529,56 @@ def node_upload_drive(state: InvoiceState) -> dict:
         return {"processing_error": "drive_folder_id_manquant"}
 
     services: GoogleServices = state["services"]
-    month_folder_name = state["invoice_folder"]
-    # Batch 2 : classement par client final (pas fournisseur).
-    # client_final est calculé par node_normalize_data ; fallback A_CLASSER si absent.
-    client_folder_name = state.get("client_final") or "A_CLASSER"
-    filename = state["invoice_filename"]
 
-    logger.info(
-        "[ 7/9 ] upload_drive : upload '%s' → '%s/%s'...",
-        filename, month_folder_name, client_folder_name,
-    )
+    # Chemin de classement : mois / contremarque / fournisseur (+ exceptions).
+    # Le registre fournit l'identité CERTAINE de l'émetteur (piège Häcker).
+    # En cas d'indisponibilité du registre ou d'erreur, repli sur l'ancien
+    # schéma 2 niveaux (mois / client_final) — le classement ne doit jamais
+    # faire échouer le pipeline.
+    registry = state.get("registry")
+    path_parts: list[str]
+    filename: str
+    if registry is not None:
+        try:
+            inv = state.get("invoice_data") or {}
+            plan = classify(
+                inv, state.get("ocr_text", ""), registry,
+                learner=lambda ids, ocr: _learn_emitter_from_invoice(registry, inv),
+            )
+            path_parts = plan.path_parts
+            filename = plan.filename
+            if plan.alternates:
+                logger.info("Classement : contremarques secondaires : %s", ", ".join(plan.alternates))
+            for w in plan.warnings:
+                logger.warning("Classement : %s", w)
+        except Exception as exc:  # noqa: BLE001 — jamais bloquant
+            logger.warning("Classement dégradé (repli 2 niveaux) : %s", exc)
+            path_parts = [state["invoice_folder"], state.get("client_final") or "_A_CLASSER"]
+            filename = state["invoice_filename"]
+    else:
+        path_parts = [state["invoice_folder"], state.get("client_final") or "_A_CLASSER"]
+        filename = state["invoice_filename"]
+
+    logger.info("[ 7/9 ] upload_drive : upload '%s' → '%s'...", filename, "/".join(path_parts))
 
     try:
-        # Niveau 1 : sous-dossier mensuel (ex : "2026-03 Mars")
-        month_id = _get_or_create_drive_folder(services, month_folder_name, DRIVE_FOLDER_ID)
-        logger.info("Dossier mensuel : '%s'", month_folder_name)
+        # Créer/retrouver l'arborescence de dossiers (racine → … → dossier final).
+        parent_id = DRIVE_FOLDER_ID
+        for part in path_parts:
+            parent_id = _get_or_create_drive_folder(services, part, parent_id)
 
-        # Niveau 2 : sous-dossier client final (ex : "GARNIER", "Brigitte_Whitechurch")
-        client_id = _get_or_create_drive_folder(services, client_folder_name, month_id)
-        logger.info("Dossier client final : '%s'", client_folder_name)
+        # Doublon : même nom de fichier déjà présent dans le dossier final →
+        # ne pas réécrire (idempotence + dédup fournisseur+n°pièce via le nom).
+        existing = _find_drive_file(services, filename, parent_id)
+        if existing:
+            logger.info("⏭️  Doublon ignoré : '%s' déjà présent dans '%s'", filename, "/".join(path_parts))
+            return {
+                "drive_file_id": existing["id"],
+                "drive_file_url": existing.get("webViewLink", ""),
+                "invoice_filename": filename,
+            }
 
-        # Upload du fichier dans le dossier client
-        file_meta = {"name": filename, "parents": [client_id]}
+        file_meta = {"name": filename, "parents": [parent_id]}
         media = MediaIoBaseUpload(
             io.BytesIO(state["facturx_pdf"]),
             mimetype="application/pdf",
@@ -510,7 +594,7 @@ def node_upload_drive(state: InvoiceState) -> dict:
         file_url = uploaded.get("webViewLink", "")
         logger.info("Drive ← '%s' : %s", filename, file_url)
 
-        return {"drive_file_id": file_id, "drive_file_url": file_url}
+        return {"drive_file_id": file_id, "drive_file_url": file_url, "invoice_filename": filename}
 
     except Exception as e:
         logger.error("Erreur upload Drive : %s", e)

@@ -38,6 +38,7 @@ from graph import build_graph  # noqa: E402
 from main import _extract_body, _find_pdf_attachments  # noqa: E402  (helpers testés)
 from services import GoogleServices, StateDB, get_google_credentials  # noqa: E402
 from state import InvoiceState  # noqa: E402
+from supplier_registry import SupplierRegistry  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,6 +92,7 @@ def _replay_one(
     services: GoogleServices,
     workflow,
     state_db: StateDB,
+    registry: SupplierRegistry,
     msg_id: str,
     *,
     force: bool,
@@ -149,6 +151,7 @@ def _replay_one(
             "client_final": "",
             "services": services,
             "state_db": state_db,
+            "registry": registry,
         }
         workflow.invoke(initial_state)
         processed += 1
@@ -183,6 +186,7 @@ def main() -> int:
     creds = get_google_credentials()
     services = GoogleServices(creds)
     state_db = StateDB(STATE_DB_PATH)
+    registry = SupplierRegistry.load()
     workflow = build_graph()
     logger.info("Connexion Google : OK — pipeline prêt")
 
@@ -195,7 +199,7 @@ def main() -> int:
     total = 0
     for msg_id in message_ids:
         try:
-            total += _replay_one(services, workflow, state_db, msg_id, force=args.force)
+            total += _replay_one(services, workflow, state_db, registry, msg_id, force=args.force)
         except Exception as exc:  # noqa: BLE001 — on continue le rattrapage
             logger.error("Rejeu échoué pour %s : %s", msg_id, exc)
 

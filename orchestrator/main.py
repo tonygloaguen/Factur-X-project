@@ -33,6 +33,7 @@ from googleapiclient.errors import HttpError
 from graph import build_graph
 from services import get_google_credentials, GoogleServices, StateDB
 from state import InvoiceState
+from supplier_registry import SupplierRegistry
 from facturx_utils import is_pdf_attachment
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,6 +323,7 @@ def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
                         # Services (singletons injectés)
                         "services": services,
                         "state_db": state_db,
+                        "registry": registry,
                     }
 
                     # ── Invoquer le graphe LangGraph ───────────────────────────
@@ -379,6 +381,9 @@ def main():
     stats = state_db.stats()
     if stats:
         logger.info("Historique existant : %s", " | ".join(f"{k}={v}" for k, v in sorted(stats.items())))
+
+    # Charger le registre fournisseurs (identité émetteur + classement Drive).
+    registry = SupplierRegistry.load()
 
     # Authentification Google OAuth2 (avec retry illimité : une coupure réseau
     # prolongée, ex. Wi-Fi coupé une partie de la nuit, ne doit pas tuer le
