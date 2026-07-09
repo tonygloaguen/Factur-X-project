@@ -266,3 +266,48 @@ def test_p1_multi_rate_vat_breakdown_valid():
     assert inv["montant_ttc"] == 172.75
     assert len(inv["ventilation_tva"]) == 2
     assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. P4 — Fournisseur étranger / autoliquidation (BR-CO-26, BR-S-02, BR-AE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_p4_foreign_seller_with_vat_valid():
+    """Fournisseur DE (Häcker) avec n° TVA intracom → identification OK, schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        vendeur={"nom": "HAECKER", "tva_intra": "DE123456789", "adresse_ligne1": "Hauptstr 1",
+                 "code_postal": "32289", "ville": "Rödinghausen", "pays_code": "DE"},
+        lignes=[{"numero": "1", "description": "Küche", "quantite": 1, "unite": "C62",
+                 "prix_unitaire_ht": 1000.0, "montant_net_ht": 1000.0, "taux_tva": 20.0, "code_tva": "S"}],
+        montant_ht=1000.0, montant_tva=200.0, montant_ttc=1200.0,
+    ))
+    assert fx.party_identification_error(inv) is None
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p4_reverse_charge_valid():
+    """Autoliquidation (AE) : TVA vendeur + SIRET acheteur → schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        vendeur={"nom": "SOUS-TRAITANT", "tva_intra": "FR99887766554", "adresse_ligne1": "1 rue",
+                 "code_postal": "75001", "ville": "Paris", "pays_code": "FR"},
+        acheteur={"nom": "CLIENT", "siret": "98765432101234", "adresse_ligne1": "2 av",
+                  "code_postal": "78114", "ville": "Magny", "pays_code": "FR"},
+        lignes=[{"numero": "1", "description": "Pose", "quantite": 1, "unite": "C62",
+                 "prix_unitaire_ht": 500.0, "montant_net_ht": 500.0, "taux_tva": 0.0, "code_tva": "AE"}],
+        montant_ht=500.0, montant_tva=0.0, montant_ttc=500.0,
+    ))
+    assert fx.party_identification_error(inv) is None
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p4_seller_without_id_would_be_rejected():
+    """Contrôle négatif : vendeur sans TVA ni SIRET → la garde le flague ET le
+    schematron officiel rejette (BR-CO-26)."""
+    inv = fx.normalize_invoice_data(_inv(
+        vendeur={"nom": "SANS ID", "adresse_ligne1": "1 rue", "code_postal": "75001",
+                 "ville": "Paris", "pays_code": "FR"},
+    ))
+    assert "BR-CO-26" in (fx.party_identification_error(inv) or "")
+    with pytest.raises(Exception, match="BR-CO-26"):
+        facturx.xml_check_schematron(
+            fx.generate_facturx_xml_en16931(inv), flavor=FLAVOR, level=LEVEL)

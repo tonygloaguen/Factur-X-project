@@ -67,6 +67,7 @@ from facturx_utils import (
     is_invoice_candidate,
     call_gemini,
     normalize_invoice_data,
+    party_identification_error,
     generate_facturx_xml_en16931,
     embed_facturx_in_pdf,
     build_filename,
@@ -330,6 +331,17 @@ def node_normalize_data(state: InvoiceState) -> dict:
             return {
                 "invoice_data": normalized,
                 "processing_error": "not_invoice_gemini:no_number_no_amount",
+            }
+
+        # P4 : défaut d'identification vendeur/acheteur (fournisseur étranger,
+        # autoliquidation) → router en Factures-Erreur AVANT de produire un XML
+        # que le schematron rejetterait (BR-CO-26 / BR-S-02 / BR-AE-02).
+        ident_error = party_identification_error(normalized)
+        if ident_error:
+            logger.warning("Identification insuffisante pour un CII valide : %s", ident_error)
+            return {
+                "invoice_data": normalized,
+                "processing_error": f"erreur_identification:{ident_error}",
             }
 
         # Batch 2 : calcul du client final depuis les données normalisées + OCR.

@@ -36,6 +36,7 @@ import time
 import unicodedata
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional
 
 import requests
 from lxml import etree
@@ -627,7 +628,7 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
     "nom_court": "Nom nettoyé sans forme juridique",
     "siret": "14 chiffres ou null",
     "siren": "9 chiffres ou null",
-    "tva_intra": "FRXX... ou DEXX... ou null",
+    "tva_intra": "N° TVA intracom AVEC préfixe pays (FR.., DE.., BE..). OBLIGATOIRE si présent — chercher 'USt-IdNr', 'VAT', 'TVA', 'IntraCom'. null seulement si vraiment absent",
     "adresse_ligne1": "Numéro et rue ou null",
     "adresse_ligne2": "Complément ou null",
     "code_postal": "string ou null",
@@ -638,7 +639,7 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
   "acheteur": {
     "nom": "Raison sociale complète ou null",
     "siret": "string ou null",
-    "tva_intra": "string ou null",
+    "tva_intra": "N° TVA acheteur AVEC préfixe pays — requis en cas d'autoliquidation (mention 'autoliquidation'/'reverse charge'/'Steuerschuldnerschaft des Leistungsempfängers'). null sinon",
     "adresse_ligne1": "Numéro et rue ou null",
     "code_postal": "string ou null",
     "ville": "string ou null",
@@ -928,6 +929,44 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) Normalisation des données Gemini pour EN16931
 # ─────────────────────────────────────────────────────────────────────────────
+
+def party_identification_error(inv: dict) -> Optional[str]:
+    """Détecte un défaut d'identification vendeur/acheteur qui ferait rejeter le
+    schematron (BR-CO-26 / BR-S-02 / BR-AE-02), afin de router l'email en
+    ``Factures-Erreur`` AVANT de produire un XML invalide (P4).
+
+    Règles appliquées (mêmes conditions que le schematron officiel EN16931) :
+      - BR-CO-26 : le vendeur doit porter au moins un identifiant — TVA (BT-31)
+        ou SIRET/immatriculation légale (BT-30).
+      - BR-S-02 : une ligne au taux standard (code « S ») exige la TVA vendeur.
+      - BR-AE-02 : en autoliquidation (« AE »), TVA vendeur ET identifiant
+        acheteur (TVA ou SIRET) sont obligatoires.
+
+    Args:
+        inv: Facture normalisée (ou brute) — lit vendeur/acheteur/lignes.
+
+    Returns:
+        Une chaîne de motif si un rejet est certain, sinon ``None``.
+    """
+    vendeur = inv.get("vendeur") or {}
+    acheteur = inv.get("acheteur") or {}
+    seller_vat = str(vendeur.get("tva_intra") or "").strip()
+    seller_siret = str(vendeur.get("siret") or "").strip()
+    buyer_vat = str(acheteur.get("tva_intra") or "").strip()
+    buyer_siret = str(acheteur.get("siret") or "").strip()
+    codes = {str(l.get("code_tva", "S")).upper() for l in (inv.get("lignes") or [])}
+
+    if not seller_vat and not seller_siret:
+        return "vendeur_non_identifie:BR-CO-26 (ni TVA ni SIRET vendeur)"
+    if "S" in codes and not seller_vat:
+        return "tva_vendeur_absente:BR-S-02 (ligne standard sans TVA vendeur)"
+    if "AE" in codes:
+        if not seller_vat:
+            return "autoliq_tva_vendeur_absente:BR-AE-02 (TVA vendeur requise)"
+        if not buyer_vat and not buyer_siret:
+            return "autoliq_acheteur_non_identifie:BR-AE-02 (TVA/SIRET acheteur requis)"
+    return None
+
 
 def normalize_invoice_data(inv: dict) -> dict:
     """
