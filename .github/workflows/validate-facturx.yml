@@ -71,6 +71,10 @@ jobs:
             tests/test_gmail_window.py \
             tests/test_error_label.py \
             tests/test_party_identification.py \
+            tests/test_supplier_registry.py \
+            tests/test_classify.py \
+            tests/test_upload_classement.py \
+            tests/test_reclasse.py \
             -v
 
       - name: Validate embedded Factur-X XML (PDFs dans le repo)
