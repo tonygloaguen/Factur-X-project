@@ -24,7 +24,15 @@ PyMuPDF>=1.24
 pypdf>=4.0
 
 # ── Factur-X (norme européenne EN 16931) ─────────────────────────────────────
-# Lib Akretion : embedding XML dans PDF, génération PDF/A-3, validation XSD
-factur-x>=3.10
+# Lib Akretion : embedding XML dans PDF, génération PDF/A-3, validation XSD +
+# schematron. Borne <5 IMPÉRATIVE : à partir de factur-x 5.0 la validation
+# schematron a migré vers un serveur Saxon HTTP externe (localhost:5000) et,
+# en son absence, elle est SILENCIEUSEMENT ignorée (« Skipping schematron
+# check ») — des factures invalides passeraient alors sans rejet. Les versions
+# 4.x valident le schematron EN16931 en-process via saxonche.
+factur-x>=4.0,<5
+# saxonche : moteur Saxon HE en-process requis par factur-x 4.x pour rejouer le
+# schematron officiel EN16931 (sinon la validation est ignorée).
+saxonche>=12.4
 # lxml : génération XML (CII D16B/D22B avec namespaces)
 lxml>=5.0

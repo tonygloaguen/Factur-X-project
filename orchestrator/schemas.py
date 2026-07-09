@@ -21,7 +21,7 @@ tels quels grâce à model_config extra="allow".
 from __future__ import annotations
 
 from datetime import datetime as _dt
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -68,7 +68,10 @@ class GeminiInvoiceOutput(BaseModel):
     numero_facture: Optional[str] = None
     date_facture: Optional[str] = None
     date_echeance: Optional[str] = None
-    type_facture: str = "380"
+    # BT-3 : 380=facture, 381=avoir, 384=facture rectificative, 389=autofacture.
+    # Gemini renvoie souvent null → le défaut d'un champ Pydantic ne s'applique
+    # QUE si la clé est absente, pas si elle vaut None ; d'où le validator before.
+    type_facture: Literal["380", "381", "384", "389"] = "380"
     devise: str = "EUR"
     montant_ht: float = 0.0
     montant_tva: float = 0.0
@@ -104,6 +107,20 @@ class GeminiInvoiceOutput(BaseModel):
     @classmethod
     def _coerce_lignes(cls, v: Any) -> list:
         return v if isinstance(v, list) else []
+
+    @field_validator("type_facture", mode="before")
+    @classmethod
+    def _default_type_facture(cls, v: Any) -> str:
+        """None / vide / code inconnu → 380 (facture commerciale) — jamais de rejet."""
+        s = str(v).strip() if v is not None else ""
+        return s if s in ("380", "381", "384", "389") else "380"
+
+    @field_validator("devise", mode="before")
+    @classmethod
+    def _default_devise(cls, v: Any) -> str:
+        """None / vide → EUR ; sinon code devise normalisé en majuscules."""
+        s = str(v).strip().upper() if v is not None else ""
+        return s or "EUR"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

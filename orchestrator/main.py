@@ -22,6 +22,7 @@ Workflow LangGraph — Vision globale :
 import base64
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,14 +60,35 @@ MIN_SECONDS_BETWEEN_CALLS = float(os.environ.get("MIN_SECONDS_BETWEEN_CALLS", "1
 MAX_GEMINI_REQUESTS_PER_DAY = int(os.environ.get("MAX_GEMINI_REQUESTS_PER_DAY", "18"))
 GMAIL_MAX_RESULTS = int(os.environ.get("GMAIL_MAX_RESULTS", "10"))
 
-def _ensure_7d(q: str) -> str:
-    """Garantit que la requête Gmail ne remonte pas plus de 7 jours (désactivable via GMAIL_ENFORCE_7D=false)."""
-    if os.environ.get("GMAIL_ENFORCE_7D", "true").lower() != "true":
-        return (q or "").strip()
-    q = (q or "").strip()
-    return q if "newer_than:" in q else (q + " newer_than:7d").strip()
+# Fenêtre de collecte Gmail (jours). Trop courte (7 j), toute facture arrivée
+# avant J-7 au premier passage devenait invisible POUR TOUJOURS (BAUS-2026-05,
+# les 3 RE…MARTINEAU/Häcker). Défaut élargi à 30 j, paramétrable.
+POLL_WINDOW_DAYS = int(os.environ.get("POLL_WINDOW_DAYS", "30"))
+# Mode rattrapage : GMAIL_CATCHUP=true retire toute borne temporelle (remonte
+# tout l'historique) pour réinjecter des factures anciennes perdues.
+GMAIL_CATCHUP = os.environ.get("GMAIL_CATCHUP", "false").lower() == "true"
 
-GMAIL_QUERY = _ensure_7d(
+
+def _ensure_window(q: str) -> str:
+    """Applique la fenêtre temporelle de collecte à la requête Gmail.
+
+    - GMAIL_CATCHUP=true : aucune borne (rattrapage complet de l'historique).
+    - sinon : garantit un ``newer_than:{POLL_WINDOW_DAYS}d`` s'il est absent.
+    - GMAIL_ENFORCE_WINDOW=false (ou l'ancien GMAIL_ENFORCE_7D=false) : désactive
+      totalement l'ajout de borne (l'appelant maîtrise sa requête).
+    """
+    q = (q or "").strip()
+    if GMAIL_CATCHUP:
+        # Retirer une éventuelle borne pour remonter tout l'historique.
+        return re.sub(r"\s*newer_than:\S+", "", q).strip()
+    enforce = os.environ.get(
+        "GMAIL_ENFORCE_WINDOW", os.environ.get("GMAIL_ENFORCE_7D", "true")
+    ).lower() == "true"
+    if not enforce:
+        return q
+    return q if "newer_than:" in q else f"{q} newer_than:{POLL_WINDOW_DAYS}d".strip()
+
+GMAIL_QUERY = _ensure_window(
     os.environ.get(
         "GMAIL_QUERY",
         "has:attachment filename:pdf -label:Factures-Traitées",

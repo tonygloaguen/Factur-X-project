@@ -35,6 +35,8 @@ import re
 import time
 import unicodedata
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional
 
 import requests
 from lxml import etree
@@ -42,6 +44,8 @@ from lxml import etree
 import fitz  # PyMuPDF : extraction texte natif + OCR via Tesseract
 
 from facturx import generate_from_binary  # Akretion : embedding PDF/A-3 + XML
+
+from unece_units import to_unece  # Normalisation unité → code UN/ECE Rec 20
 
 logger = logging.getLogger("orchestrator")
 
@@ -506,6 +510,23 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
+# ── Arithmétique monétaire exacte (P1 : BR-CO-13 / BR-S-08) ──────────────────
+# Les totaux du LLM ne sont JAMAIS dignes de confiance : on recalcule tout en
+# Decimal (ROUND_HALF_UP, quantize 0.01) et on écrase les agrégats de Gemini.
+_CENT = Decimal("0.01")
+
+
+def _dec(val) -> Decimal:
+    """Convertit une valeur quelconque en Decimal (via str pour éviter le bruit
+    binaire du float). Retombe sur 0 si non convertible."""
+    return Decimal(str(_safe_float(val)))
+
+
+def _q2(val: Decimal) -> Decimal:
+    """Arrondit un Decimal au centime (ROUND_HALF_UP)."""
+    return val.quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
 #: Conditions de paiement (BT-20) par défaut quand le montant dû est positif
 #: mais qu'aucune échéance (BT-9) ni condition n'est extraite (cf. BR-CO-25).
 DEFAULT_PAYMENT_TERMS = "Paiement à réception de facture"
@@ -607,7 +628,7 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
     "nom_court": "Nom nettoyé sans forme juridique",
     "siret": "14 chiffres ou null",
     "siren": "9 chiffres ou null",
-    "tva_intra": "FRXX... ou DEXX... ou null",
+    "tva_intra": "N° TVA intracom AVEC préfixe pays (FR.., DE.., BE..). OBLIGATOIRE si présent — chercher 'USt-IdNr', 'VAT', 'TVA', 'IntraCom'. null seulement si vraiment absent",
     "adresse_ligne1": "Numéro et rue ou null",
     "adresse_ligne2": "Complément ou null",
     "code_postal": "string ou null",
@@ -618,7 +639,7 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
   "acheteur": {
     "nom": "Raison sociale complète ou null",
     "siret": "string ou null",
-    "tva_intra": "string ou null",
+    "tva_intra": "N° TVA acheteur AVEC préfixe pays — requis en cas d'autoliquidation (mention 'autoliquidation'/'reverse charge'/'Steuerschuldnerschaft des Leistungsempfängers'). null sinon",
     "adresse_ligne1": "Numéro et rue ou null",
     "code_postal": "string ou null",
     "ville": "string ou null",
@@ -630,7 +651,7 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
       "numero": "1",
       "description": "Description de l'article ou du service",
       "quantite": 1.0,
-      "unite": "C62 pour unité, HUR pour heure, KGM pour kg, MTR pour mètre",
+      "unite": "unité TELLE QU'IMPRIMÉE sur la facture (ex: 'm²', 'ml', 'U', 'h', 'kg') — ne pas convertir",
       "prix_unitaire_ht": 100.00,
       "montant_net_ht": 100.00,
       "taux_tva": 20.0,
@@ -909,6 +930,44 @@ def call_gemini(ocr_text: str, email_context: str = "") -> dict:
 # 3) Normalisation des données Gemini pour EN16931
 # ─────────────────────────────────────────────────────────────────────────────
 
+def party_identification_error(inv: dict) -> Optional[str]:
+    """Détecte un défaut d'identification vendeur/acheteur qui ferait rejeter le
+    schematron (BR-CO-26 / BR-S-02 / BR-AE-02), afin de router l'email en
+    ``Factures-Erreur`` AVANT de produire un XML invalide (P4).
+
+    Règles appliquées (mêmes conditions que le schematron officiel EN16931) :
+      - BR-CO-26 : le vendeur doit porter au moins un identifiant — TVA (BT-31)
+        ou SIRET/immatriculation légale (BT-30).
+      - BR-S-02 : une ligne au taux standard (code « S ») exige la TVA vendeur.
+      - BR-AE-02 : en autoliquidation (« AE »), TVA vendeur ET identifiant
+        acheteur (TVA ou SIRET) sont obligatoires.
+
+    Args:
+        inv: Facture normalisée (ou brute) — lit vendeur/acheteur/lignes.
+
+    Returns:
+        Une chaîne de motif si un rejet est certain, sinon ``None``.
+    """
+    vendeur = inv.get("vendeur") or {}
+    acheteur = inv.get("acheteur") or {}
+    seller_vat = str(vendeur.get("tva_intra") or "").strip()
+    seller_siret = str(vendeur.get("siret") or "").strip()
+    buyer_vat = str(acheteur.get("tva_intra") or "").strip()
+    buyer_siret = str(acheteur.get("siret") or "").strip()
+    codes = {str(l.get("code_tva", "S")).upper() for l in (inv.get("lignes") or [])}
+
+    if not seller_vat and not seller_siret:
+        return "vendeur_non_identifie:BR-CO-26 (ni TVA ni SIRET vendeur)"
+    if "S" in codes and not seller_vat:
+        return "tva_vendeur_absente:BR-S-02 (ligne standard sans TVA vendeur)"
+    if "AE" in codes:
+        if not seller_vat:
+            return "autoliq_tva_vendeur_absente:BR-AE-02 (TVA vendeur requise)"
+        if not buyer_vat and not buyer_siret:
+            return "autoliq_acheteur_non_identifie:BR-AE-02 (TVA/SIRET acheteur requis)"
+    return None
+
+
 def normalize_invoice_data(inv: dict) -> dict:
     """
     Normalise et complète les données extraites par Gemini.
@@ -958,7 +1017,11 @@ def normalize_invoice_data(inv: dict) -> dict:
             line.setdefault("numero", str(i + 1))
             line.setdefault("description", "Article")
             line.setdefault("quantite", 1.0)
-            line.setdefault("unite", "C62")
+            # P0 (fix cii @unitCode) : mapper l'unité libre de Gemini (« m² »,
+            # « UNI », « ml »…) vers un code UN/ECE Rec 20 AVANT le CII. La valeur
+            # brute ne doit jamais atteindre BilledQuantity/@unitCode (rejet
+            # schematron « @unitCode is not allowed »).
+            line["unite"] = to_unece(line.get("unite") or "C62")
             line.setdefault("code_tva", "S")
             line.setdefault("taux_tva", 20.0)
             pu = _safe_float(line.get("prix_unitaire_ht"))
@@ -996,43 +1059,61 @@ def normalize_invoice_data(inv: dict) -> dict:
                     _buyer_siret_env,
                 )
 
-    # --- Ventilation TVA (BG-23) : calculer si absente ---
-    if not inv.get("ventilation_tva"):
-        tva_map: dict[tuple[str, float], dict] = {}
-        for line in lignes:
-            code = line.get("code_tva", "S")
-            taux = _safe_float(line.get("taux_tva", 20.0))
-            net = _safe_float(line.get("montant_net_ht"))
-            key = (code, taux)
-            if key not in tva_map:
-                tva_map[key] = {"code_tva": code, "taux": taux, "base_ht": 0.0, "montant_tva": 0.0}
-            tva_map[key]["base_ht"] += net
-            tva_map[key]["montant_tva"] += round(net * taux / 100, 2)
-        inv["ventilation_tva"] = list(tva_map.values())
+    # --- P1 : lignes exprimées en TTC (ex. Leroy Merlin chantier) ------------
+    # Certains fournisseurs impriment le prix/montant de ligne TTC. On le détecte
+    # quand la somme des montants de ligne colle au TTC de Gemini (et non au HT)
+    # avec une TVA positive sur chaque ligne, puis on reconvertit en HT au taux
+    # de la ligne AVANT toute agrégation (sinon BR-CO-13/BR-S-08 échouent).
+    sum_net_raw = sum((_dec(l.get("montant_net_ht")) for l in lignes), Decimal(0))
+    g_ht = _dec(inv.get("montant_ht"))
+    g_ttc = _dec(inv.get("montant_ttc"))
+    all_lines_taxed = bool(lignes) and all(_safe_float(l.get("taux_tva")) > 0 for l in lignes)
+    if g_ttc > 0 and sum_net_raw > 0 and all_lines_taxed:
+        close_to_ttc = abs(sum_net_raw - g_ttc) <= g_ttc * Decimal("0.02")
+        exceeds_ht = g_ht > 0 and sum_net_raw > g_ht * Decimal("1.02")
+        if close_to_ttc and exceeds_ht:
+            for line in lignes:
+                factor = Decimal(1) + _dec(line.get("taux_tva")) / Decimal(100)
+                if factor > 0:
+                    line["montant_net_ht"] = float(_q2(_dec(line.get("montant_net_ht")) / factor))
+                    line["prix_unitaire_ht"] = float(_q2(_dec(line.get("prix_unitaire_ht")) / factor))
+            logger.info("P1 : lignes détectées en TTC → reconverties en HT (%d ligne(s))", len(lignes))
 
-    for v in inv["ventilation_tva"]:
-        v["base_ht"] = round(_safe_float(v.get("base_ht")), 2)
-        v["montant_tva"] = round(_safe_float(v.get("montant_tva")), 2)
+    # --- Ventilation TVA (BG-23) recalculée depuis les lignes en Decimal ------
+    # Toujours écrasée (jamais fiée à Gemini) : garantit BR-S-08 (base × taux =
+    # montant de TVA par taux) et BR-CO-14 (TVA totale = Σ ventilation).
+    tva_map: dict[tuple[str, str], dict] = {}
+    for line in lignes:
+        code = line.get("code_tva", "S")
+        taux = _dec(line.get("taux_tva", 20.0))
+        net = _dec(line.get("montant_net_ht"))
+        key = (code, str(taux))
+        entry = tva_map.setdefault(
+            key, {"code_tva": code, "taux": float(taux), "_base": Decimal(0)}
+        )
+        entry["_base"] += net
+    ventilation = []
+    for entry in tva_map.values():
+        base = _q2(entry["_base"])
+        montant = _q2(base * _dec(entry["taux"]) / Decimal(100))
+        ventilation.append({
+            "code_tva": entry["code_tva"], "taux": entry["taux"],
+            "base_ht": float(base), "montant_tva": float(montant),
+        })
+    inv["ventilation_tva"] = ventilation
 
-    # --- Totaux monétaires (BG-22) : recalculer si incohérents ---
-    sum_lines = round(sum(_safe_float(l.get("montant_net_ht")) for l in lignes), 2)
-    sum_tva = round(sum(_safe_float(v.get("montant_tva")) for v in inv["ventilation_tva"]), 2)
+    # --- Totaux monétaires (BG-22) recalculés en Decimal — écrasent Gemini ----
+    # BR-CO-13 : TaxBasisTotal (BT-109) = Σ montants nets de ligne (pas de
+    # remise/charge document-level ici). BR-CO-15 : TTC = HT + TVA totale.
+    total_ht = _q2(sum((_dec(l.get("montant_net_ht")) for l in lignes), Decimal(0)))
+    total_vat = _q2(sum((_dec(v["montant_tva"]) for v in ventilation), Decimal(0)))
+    total_ttc = _q2(total_ht + total_vat)
 
-    ht = _safe_float(inv.get("montant_ht"))
-    tva = _safe_float(inv.get("montant_tva"))
-    ttc = _safe_float(inv.get("montant_ttc"))
-
-    if ht == 0.0:
-        ht = sum_lines
-    if tva == 0.0:
-        tva = sum_tva
-    if ttc == 0.0:
-        ttc = round(ht + tva, 2)
-
-    inv["montant_total_lignes_net"] = sum_lines
-    inv["montant_ht"] = ht
-    inv["montant_tva"] = tva
-    inv["montant_ttc"] = ttc
+    inv["montant_total_lignes_net"] = float(total_ht)
+    inv["montant_ht"] = float(total_ht)
+    inv["montant_tva"] = float(total_vat)
+    inv["montant_ttc"] = float(total_ttc)
+    ttc = float(total_ttc)
 
     # --- Montant dû (BT-115) + conditions de paiement (BT-20) : BR-CO-25 ------
     # BR-CO-25 : si le montant dû (BT-115) est positif, le XML DOIT contenir
@@ -1062,9 +1143,12 @@ def normalize_invoice_data(inv: dict) -> dict:
     inv["conditions_paiement"] = conditions or None
 
     # --- Divers ---
-    inv.setdefault("devise", "EUR")
-    inv.setdefault("type_facture", "380")
+    # setdefault ne remplace pas une valeur None explicite (Gemini renvoie souvent
+    # type_facture/devise = null) : on force donc un défaut métier via `or`.
+    inv["devise"] = (inv.get("devise") or "EUR")
+    inv["type_facture"] = (inv.get("type_facture") or "380")
     inv.setdefault("date_facture", datetime.now().strftime("%Y-%m-%d"))
+    inv["date_facture"] = inv.get("date_facture") or datetime.now().strftime("%Y-%m-%d")
     inv.setdefault("code_moyen_paiement", "30" if inv.get("iban") else None)
 
     return inv

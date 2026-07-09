@@ -162,3 +162,152 @@ def test_schematron_pdf_embedded_paid_invoice_valid():
     xml = fx.generate_facturx_xml_en16931(inv)
     embedded_pdf = fx.embed_facturx_in_pdf(_make_source_pdf(), xml)
     facturx.get_xml_from_pdf(embedded_pdf, check_xsd=True, check_schematron=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. P0 — unitCode UN/ECE Rec 20 : cas cible IN-IPSO (facturé au m²)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _inv_m2(**over) -> dict:
+    """Facture type IN-IPSO : mélaminé facturé au m² (unité brute « m² »)."""
+    return _inv(
+        numero_facture="FPA0002846",
+        lignes=[{
+            "numero": "1", "description": "Panneau mélaminé", "quantite": 12.5,
+            "unite": "m²", "prix_unitaire_ht": 24.0, "montant_net_ht": 300.0,
+            "taux_tva": 20.0, "code_tva": "S",
+        }],
+        montant_ht=300.0, montant_tva=60.0, montant_ttc=360.0,
+        **over,
+    )
+
+
+def test_schematron_m2_invoice_maps_to_mtk_and_validates():
+    """Cas cible IN-IPSO : « m² » brut → MTK après normalize → schematron OK.
+
+    C'est la non-régression du rejet « @unitCode is not allowed » (252 occ.).
+    """
+    inv = fx.normalize_invoice_data(_inv_m2())
+    assert inv["lignes"][0]["unite"] == "MTK"  # m² mappé avant CII
+    xml = fx.generate_facturx_xml_en16931(inv)
+    assert b'unitCode="MTK"' in xml
+    assert facturx.xml_check_xsd(xml, flavor=FLAVOR, level=LEVEL) is True
+    assert facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL) is True
+
+
+def test_schematron_negative_control_raw_unit_is_rejected():
+    """Contrôle négatif : l'unité BRUTE « m² » (état d'avant P0), injectée
+    dans le CII SANS passer par normalize, DOIT être rejetée par le schematron
+    (« @unitCode is not allowed ») — preuve que c'est bien le mapping qui corrige.
+    """
+    raw = _inv_m2()
+    # On saute volontairement normalize_invoice_data : l'unité reste « m² ».
+    assert raw["lignes"][0]["unite"] == "m²"
+    xml = fx.generate_facturx_xml_en16931(raw)
+    assert 'unitCode="m²"'.encode() in xml
+    with pytest.raises(Exception, match="unitCode"):
+        facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. P1 — Recalcul des totaux en Decimal (BR-CO-13 / BR-S-08 / BR-CO-15)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _valid(xml) -> bool:
+    return (
+        facturx.xml_check_xsd(xml, flavor=FLAVOR, level=LEVEL) is True
+        and facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL) is True
+    )
+
+
+def test_p1_incoherent_gemini_totals_are_overwritten():
+    """Les totaux incohérents de Gemini sont écrasés par le recalcul Decimal →
+    cohérence BR-CO-13/BR-CO-15 et schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        lignes=[
+            {"numero": "1", "description": "A", "quantite": 3, "unite": "C62",
+             "prix_unitaire_ht": 10.0, "montant_net_ht": 30.0, "taux_tva": 20.0, "code_tva": "S"},
+            {"numero": "2", "description": "B", "quantite": 1, "unite": "C62",
+             "prix_unitaire_ht": 7.77, "montant_net_ht": 7.77, "taux_tva": 20.0, "code_tva": "S"},
+        ],
+        montant_ht=999.0, montant_tva=1.0, montant_ttc=1234.0,  # valeurs fausses
+    ))
+    assert inv["montant_ht"] == 37.77
+    assert inv["montant_tva"] == 7.55   # 37.77 × 20 % arrondi HALF_UP
+    assert inv["montant_ttc"] == 45.32
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p1_ttc_lines_are_reconverted_to_ht():
+    """Lignes exprimées en TTC (Leroy Merlin chantier) → reconverties en HT
+    avant agrégation → schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        lignes=[{"numero": "1", "description": "Ciment", "quantite": 10, "unite": "C62",
+                 "prix_unitaire_ht": 12.0, "montant_net_ht": 120.0, "taux_tva": 20.0, "code_tva": "S"}],
+        montant_ht=100.0, montant_tva=20.0, montant_ttc=120.0,  # net ligne == TTC
+    ))
+    assert inv["montant_ht"] == 100.0          # 120 / 1.20
+    assert inv["lignes"][0]["montant_net_ht"] == 100.0
+    assert inv["montant_ttc"] == 120.0
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p1_multi_rate_vat_breakdown_valid():
+    """Ventilation TVA multi-taux recalculée depuis les lignes → BR-S-08 OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        lignes=[
+            {"numero": "1", "description": "Std", "quantite": 1, "unite": "C62",
+             "prix_unitaire_ht": 100.0, "montant_net_ht": 100.0, "taux_tva": 20.0, "code_tva": "S"},
+            {"numero": "2", "description": "Réduit", "quantite": 1, "unite": "C62",
+             "prix_unitaire_ht": 50.0, "montant_net_ht": 50.0, "taux_tva": 5.5, "code_tva": "S"},
+        ],
+    ))
+    assert inv["montant_tva"] == 22.75         # 20 + 2.75
+    assert inv["montant_ttc"] == 172.75
+    assert len(inv["ventilation_tva"]) == 2
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. P4 — Fournisseur étranger / autoliquidation (BR-CO-26, BR-S-02, BR-AE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_p4_foreign_seller_with_vat_valid():
+    """Fournisseur DE (Häcker) avec n° TVA intracom → identification OK, schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        vendeur={"nom": "HAECKER", "tva_intra": "DE123456789", "adresse_ligne1": "Hauptstr 1",
+                 "code_postal": "32289", "ville": "Rödinghausen", "pays_code": "DE"},
+        lignes=[{"numero": "1", "description": "Küche", "quantite": 1, "unite": "C62",
+                 "prix_unitaire_ht": 1000.0, "montant_net_ht": 1000.0, "taux_tva": 20.0, "code_tva": "S"}],
+        montant_ht=1000.0, montant_tva=200.0, montant_ttc=1200.0,
+    ))
+    assert fx.party_identification_error(inv) is None
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p4_reverse_charge_valid():
+    """Autoliquidation (AE) : TVA vendeur + SIRET acheteur → schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        vendeur={"nom": "SOUS-TRAITANT", "tva_intra": "FR99887766554", "adresse_ligne1": "1 rue",
+                 "code_postal": "75001", "ville": "Paris", "pays_code": "FR"},
+        acheteur={"nom": "CLIENT", "siret": "98765432101234", "adresse_ligne1": "2 av",
+                  "code_postal": "78114", "ville": "Magny", "pays_code": "FR"},
+        lignes=[{"numero": "1", "description": "Pose", "quantite": 1, "unite": "C62",
+                 "prix_unitaire_ht": 500.0, "montant_net_ht": 500.0, "taux_tva": 0.0, "code_tva": "AE"}],
+        montant_ht=500.0, montant_tva=0.0, montant_ttc=500.0,
+    ))
+    assert fx.party_identification_error(inv) is None
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p4_seller_without_id_would_be_rejected():
+    """Contrôle négatif : vendeur sans TVA ni SIRET → la garde le flague ET le
+    schematron officiel rejette (BR-CO-26)."""
+    inv = fx.normalize_invoice_data(_inv(
+        vendeur={"nom": "SANS ID", "adresse_ligne1": "1 rue", "code_postal": "75001",
+                 "ville": "Paris", "pays_code": "FR"},
+    ))
+    assert "BR-CO-26" in (fx.party_identification_error(inv) or "")
+    with pytest.raises(Exception, match="BR-CO-26"):
+        facturx.xml_check_schematron(
+            fx.generate_facturx_xml_en16931(inv), flavor=FLAVOR, level=LEVEL)
