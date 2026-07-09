@@ -339,16 +339,20 @@ def classify(
             filename=filename, route="communication", resolution_method=res.method,
         )
 
-    # Fournisseur (dossier niveau 3).
-    if res.canonical:
-        fournisseur = res.canonical
-    else:
-        # Inconnu sans learner : repli sur le nom d'en-tête (slug), jamais self.
+    # Émetteur non identifié (même après apprentissage) → _A_CLASSER : on ne
+    # devine JAMAIS un fournisseur depuis l'en-tête (piège Häcker), garde-fou #5.
+    if not res.canonical:
         vendeur = inv.get("vendeur") or {}
-        fournisseur = slugify(vendeur.get("nom_court") or vendeur.get("nom") or "") or FALLBACK_FOLDER
-        warnings.append("émetteur non résolu par le registre (repli sur le nom d'en-tête)")
-        logger.warning("Classement : émetteur non identifié → repli '%s'", fournisseur)
+        header = slugify(vendeur.get("nom_court") or vendeur.get("nom") or "") or "FOURNISSEUR_INCONNU"
+        warnings.append("émetteur non identifié")
+        logger.warning("Classement : émetteur non identifié → %s (%s)", FALLBACK_FOLDER, header)
+        return Classification(
+            month=month, fournisseur=header, contremarque=FALLBACK_FOLDER,
+            filename=build_classified_filename(inv, header, credit=credit),
+            route="a_classer", resolution_method=res.method, warnings=warnings,
+        )
 
+    fournisseur = res.canonical
     filename = build_classified_filename(inv, fournisseur, credit=credit)
 
     # Contremarque (dossier niveau 2).
