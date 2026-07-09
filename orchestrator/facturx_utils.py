@@ -1104,9 +1104,12 @@ def normalize_invoice_data(inv: dict) -> dict:
     inv["conditions_paiement"] = conditions or None
 
     # --- Divers ---
-    inv.setdefault("devise", "EUR")
-    inv.setdefault("type_facture", "380")
+    # setdefault ne remplace pas une valeur None explicite (Gemini renvoie souvent
+    # type_facture/devise = null) : on force donc un défaut métier via `or`.
+    inv["devise"] = (inv.get("devise") or "EUR")
+    inv["type_facture"] = (inv.get("type_facture") or "380")
     inv.setdefault("date_facture", datetime.now().strftime("%Y-%m-%d"))
+    inv["date_facture"] = inv.get("date_facture") or datetime.now().strftime("%Y-%m-%d")
     inv.setdefault("code_moyen_paiement", "30" if inv.get("iban") else None)
 
     return inv
