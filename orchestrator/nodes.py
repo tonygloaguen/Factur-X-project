@@ -83,6 +83,11 @@ logger = logging.getLogger("orchestrator")
 # Variables d'environnement lues une seule fois au chargement du module
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 GMAIL_LABEL_NAME = os.environ.get("GMAIL_LABEL", "Factures-Traitées")
+# Label appliqué aux emails en échec DUR (embedding/XML/normalisation/Drive) :
+# sans lui, un email en échec restait « nu » (ni Traitées ni marqueur) et, une
+# fois sorti de la fenêtre de polling, devenait introuvable. Ce label rend
+# l'échec visible et permet une requête de reprise dédiée (cf. scripts/replay.py).
+GMAIL_ERROR_LABEL = os.environ.get("GMAIL_ERROR_LABEL", "Factures-Erreur")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Nœud 1 : extract_text — OCR du PDF
@@ -574,6 +579,26 @@ def node_label_gmail(state: InvoiceState) -> dict:
 # Nœud 9 : log_result — Log final + écriture SQLite
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _apply_error_label(state: InvoiceState) -> None:
+    """Applique le label ``Factures-Erreur`` à l'email en échec (best-effort).
+
+    Non bloquant : toute erreur d'API Gmail est journalisée sans interrompre le
+    nœud terminal. Nécessite ``services`` et ``message_id`` dans l'état.
+    """
+    services = state.get("services")
+    message_id = state.get("message_id")
+    if not services or not message_id:
+        return
+    try:
+        label_id = services.get_or_create_label(GMAIL_ERROR_LABEL)
+        services.gmail.users().messages().modify(
+            userId="me", id=message_id, body={"addLabelIds": [label_id]},
+        ).execute()
+        logger.info("Label '%s' appliqué à l'email %s", GMAIL_ERROR_LABEL, message_id)
+    except Exception as exc:  # noqa: BLE001 — traçabilité best-effort
+        logger.warning("Label '%s' non appliqué (non bloquant) : %s", GMAIL_ERROR_LABEL, exc)
+
+
 def node_log_result(state: InvoiceState) -> dict:
     """
     Nœud terminal : log le résultat et écrit dans SQLite (anti-replay).
@@ -621,6 +646,9 @@ def node_log_result(state: InvoiceState) -> dict:
             state.get("sender", "?"), state.get("subject", "?")[:50],
             state["pdf_filename"], error,
         )
+        # P2 : rendre l'échec traçable dans Gmail (label dédié) plutôt que de
+        # laisser l'email « nu » et le perdre à la sortie de la fenêtre de polling.
+        _apply_error_label(state)
 
     else:
         # Succès complet !

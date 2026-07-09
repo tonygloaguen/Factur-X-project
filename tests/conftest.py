@@ -41,6 +41,7 @@ for _pkg in (
     "googleapiclient",
     "googleapiclient.http",
     "googleapiclient.discovery",
+    "googleapiclient.errors",
     "google",
     "google.oauth2",
     "google.oauth2.credentials",
