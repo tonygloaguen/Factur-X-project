@@ -1,0 +1,134 @@
+{
+  "_meta": {
+    "description": "Registre fournisseurs amorce pour le classement GDrive Factur-X. Cle = nom canonique (= nom du dossier fournisseur). Identification par identifiants FORTS (TVA intracom > SIRET) puis faibles (domaine email, nom). Enrichi automatiquement au fil de l'eau.",
+    "self": "JMT_DECO",
+    "version": 1
+  },
+
+  "JMT_DECO": {
+    "role": "self",
+    "legal_name": "Societe JMT Deco",
+    "brand": "Raison Home",
+    "vat": ["FR41944684497"],
+    "siret": ["94468449700018"],
+    "rcs": "944684497",
+    "email_domains": ["raisonhome.com"],
+    "country": "FR",
+    "note": "Entite de l'utilisateur. N'est JAMAIS fournisseur ni contremarque. Sur une facture de vente elle est l'emetteur; le client final devient la contremarque."
+  },
+
+  "Communication": {
+    "role": "franchisor",
+    "route_override": "Communication",
+    "legal_name": "Raison Home",
+    "vat": ["FR88428155956"],
+    "siret": ["42815595600058"],
+    "country": "FR",
+    "note": "Franchiseur. Toute facture dont l'EMETTEUR est cette entite va dans <mois>/Communication/. NE PAS confondre avec la mention d'enseigne 'RAISON HOME' qui apparait a cote de JMT Deco comme client sur les factures fournisseurs."
+  },
+
+  "HACKER": {
+    "role": "supplier",
+    "legal_name": "Hacker Kuchen GmbH & Co. KG",
+    "brand": "Hacker",
+    "vat": ["DE174736262"],
+    "email_domains": ["haecker-kuechen.de"],
+    "country": "DE",
+    "flags": ["intracommunity"],
+    "note": "Fournisseur allemand. Livraison intracommunautaire exoneree (art 6a UStG / 138 dir 2006/112). En-tete affiche 'SARL JMT deco' = ACHETEUR, pas vendeur."
+  },
+
+  "IN-IPSO": {
+    "role": "supplier",
+    "legal_name": "B & F Productions",
+    "brand": "IN-IPSO",
+    "vat": ["FR28753043371"],
+    "email_domains": ["in-ipso.com"],
+    "country": "FR",
+    "flags": ["unit_m2"],
+    "note": "Facture au m2 (unitCode MTK). Champ contremarque explicite 'Contremarque'."
+  },
+
+  "GPDIS": {
+    "role": "supplier",
+    "legal_name": "GPDIS France",
+    "vat": ["FR64327127247"],
+    "siret": ["32712724700200"],
+    "country": "FR",
+    "note": "Emet aussi des AVOIRS (type 381). Contremarque en 'V/Ref'."
+  },
+
+  "INTERBAT": {
+    "role": "supplier",
+    "legal_name": "Interbat SAS",
+    "vat": ["FR57315041756"],
+    "siret": ["31504175600083"],
+    "email_domains": ["interbat.fr"],
+    "country": "FR",
+    "note": "Contremarque en 'C/M' ou 'Reference'."
+  },
+
+  "BAUS": {
+    "role": "supplier",
+    "legal_name": "Societe Nouvelle Paris Est Courses",
+    "brand": "BAUS INT'L",
+    "vat": ["FR93398118679"],
+    "siret": ["39811867900040"],
+    "email_domains": ["baus-intl.fr"],
+    "country": "FR",
+    "note": "Transporteur/plateforme. Apparait AUSSI comme 'adresse de livraison' sur des factures d'autres fournisseurs: ne pas en deduire que BAUS est le vendeur dans ce cas."
+  },
+
+  "MENUISERIE_JH": {
+    "role": "supplier",
+    "legal_name": "Menuiserie JH",
+    "vat": ["FR11978827517"],
+    "siren": ["978827517"],
+    "country": "FR",
+    "note": "Email johann.hardy78@gmail.com = domaine perso, NON fiable comme cle. Identifier par TVA/SIREN."
+  },
+
+  "LEROY_MERLIN": {
+    "role": "supplier",
+    "legal_name": "Leroy Merlin France",
+    "brand": "Leroy Merlin Bois-d'Arcy",
+    "siret": ["38456094201209"],
+    "email_domains": ["leroymerlin.fr"],
+    "country": "FR",
+    "note": "Ticket magasin, montants en TTC ligne a ligne. Pas de contremarque sur le ticket. Risque de doublon (meme n de facture, deux fichiers)."
+  },
+
+  "LMC": {
+    "role": "supplier",
+    "legal_name": "LMC",
+    "email_domains": ["lmcstore.com"],
+    "country": "FR",
+    "note": "Bondues 59910. Pas d'identifiant fort lu a ce jour: a completer (TVA/SIRET) au prochain passage. Contremarque en 'Reference client'."
+  },
+
+  "DISCAC": {
+    "role": "supplier",
+    "legal_name": "Discac",
+    "email_domains": ["discac.fr"],
+    "country": "FR",
+    "note": "Izon 33450. Pas d'identifiant fort lu: a completer. Eco-participation DEA + escompte 2%. Texte source pollue par pseudo-balises <client>...</client> a nettoyer avant extraction."
+  },
+
+  "EDUARDO_LEITE_CORREIA_FERNANDES": {
+    "role": "supplier",
+    "legal_name": "Eduardo Leite Correia Fernandes",
+    "country": "FR",
+    "flags": ["no_vat"],
+    "note": "Auto-entrepreneur (TVA non applicable). Email hotmail perso. Identifier par nom. Chantier indique via l'adresse de travaux."
+  },
+
+  "JARDINERIE_CHEVREUSE": {
+    "role": "supplier",
+    "legal_name": "Jardinerie Chevreuse",
+    "vat": ["FR80308907419"],
+    "siret": ["30890741900011"],
+    "country": "FR",
+    "flags": ["to_confirm", "source_image"],
+    "note": "Coordonnees issues d'une photo de faible qualite: A CONFIRMER sur une source nette avant de fiabiliser."
+  }
+}
