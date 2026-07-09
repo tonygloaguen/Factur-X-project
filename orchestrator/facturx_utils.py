@@ -35,6 +35,7 @@ import re
 import time
 import unicodedata
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 
 import requests
 from lxml import etree
@@ -506,6 +507,23 @@ def _safe_float(val, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+# ── Arithmétique monétaire exacte (P1 : BR-CO-13 / BR-S-08) ──────────────────
+# Les totaux du LLM ne sont JAMAIS dignes de confiance : on recalcule tout en
+# Decimal (ROUND_HALF_UP, quantize 0.01) et on écrase les agrégats de Gemini.
+_CENT = Decimal("0.01")
+
+
+def _dec(val) -> Decimal:
+    """Convertit une valeur quelconque en Decimal (via str pour éviter le bruit
+    binaire du float). Retombe sur 0 si non convertible."""
+    return Decimal(str(_safe_float(val)))
+
+
+def _q2(val: Decimal) -> Decimal:
+    """Arrondit un Decimal au centime (ROUND_HALF_UP)."""
+    return val.quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
 #: Conditions de paiement (BT-20) par défaut quand le montant dû est positif
@@ -1002,43 +1020,61 @@ def normalize_invoice_data(inv: dict) -> dict:
                     _buyer_siret_env,
                 )
 
-    # --- Ventilation TVA (BG-23) : calculer si absente ---
-    if not inv.get("ventilation_tva"):
-        tva_map: dict[tuple[str, float], dict] = {}
-        for line in lignes:
-            code = line.get("code_tva", "S")
-            taux = _safe_float(line.get("taux_tva", 20.0))
-            net = _safe_float(line.get("montant_net_ht"))
-            key = (code, taux)
-            if key not in tva_map:
-                tva_map[key] = {"code_tva": code, "taux": taux, "base_ht": 0.0, "montant_tva": 0.0}
-            tva_map[key]["base_ht"] += net
-            tva_map[key]["montant_tva"] += round(net * taux / 100, 2)
-        inv["ventilation_tva"] = list(tva_map.values())
+    # --- P1 : lignes exprimées en TTC (ex. Leroy Merlin chantier) ------------
+    # Certains fournisseurs impriment le prix/montant de ligne TTC. On le détecte
+    # quand la somme des montants de ligne colle au TTC de Gemini (et non au HT)
+    # avec une TVA positive sur chaque ligne, puis on reconvertit en HT au taux
+    # de la ligne AVANT toute agrégation (sinon BR-CO-13/BR-S-08 échouent).
+    sum_net_raw = sum((_dec(l.get("montant_net_ht")) for l in lignes), Decimal(0))
+    g_ht = _dec(inv.get("montant_ht"))
+    g_ttc = _dec(inv.get("montant_ttc"))
+    all_lines_taxed = bool(lignes) and all(_safe_float(l.get("taux_tva")) > 0 for l in lignes)
+    if g_ttc > 0 and sum_net_raw > 0 and all_lines_taxed:
+        close_to_ttc = abs(sum_net_raw - g_ttc) <= g_ttc * Decimal("0.02")
+        exceeds_ht = g_ht > 0 and sum_net_raw > g_ht * Decimal("1.02")
+        if close_to_ttc and exceeds_ht:
+            for line in lignes:
+                factor = Decimal(1) + _dec(line.get("taux_tva")) / Decimal(100)
+                if factor > 0:
+                    line["montant_net_ht"] = float(_q2(_dec(line.get("montant_net_ht")) / factor))
+                    line["prix_unitaire_ht"] = float(_q2(_dec(line.get("prix_unitaire_ht")) / factor))
+            logger.info("P1 : lignes détectées en TTC → reconverties en HT (%d ligne(s))", len(lignes))
 
-    for v in inv["ventilation_tva"]:
-        v["base_ht"] = round(_safe_float(v.get("base_ht")), 2)
-        v["montant_tva"] = round(_safe_float(v.get("montant_tva")), 2)
+    # --- Ventilation TVA (BG-23) recalculée depuis les lignes en Decimal ------
+    # Toujours écrasée (jamais fiée à Gemini) : garantit BR-S-08 (base × taux =
+    # montant de TVA par taux) et BR-CO-14 (TVA totale = Σ ventilation).
+    tva_map: dict[tuple[str, str], dict] = {}
+    for line in lignes:
+        code = line.get("code_tva", "S")
+        taux = _dec(line.get("taux_tva", 20.0))
+        net = _dec(line.get("montant_net_ht"))
+        key = (code, str(taux))
+        entry = tva_map.setdefault(
+            key, {"code_tva": code, "taux": float(taux), "_base": Decimal(0)}
+        )
+        entry["_base"] += net
+    ventilation = []
+    for entry in tva_map.values():
+        base = _q2(entry["_base"])
+        montant = _q2(base * _dec(entry["taux"]) / Decimal(100))
+        ventilation.append({
+            "code_tva": entry["code_tva"], "taux": entry["taux"],
+            "base_ht": float(base), "montant_tva": float(montant),
+        })
+    inv["ventilation_tva"] = ventilation
 
-    # --- Totaux monétaires (BG-22) : recalculer si incohérents ---
-    sum_lines = round(sum(_safe_float(l.get("montant_net_ht")) for l in lignes), 2)
-    sum_tva = round(sum(_safe_float(v.get("montant_tva")) for v in inv["ventilation_tva"]), 2)
+    # --- Totaux monétaires (BG-22) recalculés en Decimal — écrasent Gemini ----
+    # BR-CO-13 : TaxBasisTotal (BT-109) = Σ montants nets de ligne (pas de
+    # remise/charge document-level ici). BR-CO-15 : TTC = HT + TVA totale.
+    total_ht = _q2(sum((_dec(l.get("montant_net_ht")) for l in lignes), Decimal(0)))
+    total_vat = _q2(sum((_dec(v["montant_tva"]) for v in ventilation), Decimal(0)))
+    total_ttc = _q2(total_ht + total_vat)
 
-    ht = _safe_float(inv.get("montant_ht"))
-    tva = _safe_float(inv.get("montant_tva"))
-    ttc = _safe_float(inv.get("montant_ttc"))
-
-    if ht == 0.0:
-        ht = sum_lines
-    if tva == 0.0:
-        tva = sum_tva
-    if ttc == 0.0:
-        ttc = round(ht + tva, 2)
-
-    inv["montant_total_lignes_net"] = sum_lines
-    inv["montant_ht"] = ht
-    inv["montant_tva"] = tva
-    inv["montant_ttc"] = ttc
+    inv["montant_total_lignes_net"] = float(total_ht)
+    inv["montant_ht"] = float(total_ht)
+    inv["montant_tva"] = float(total_vat)
+    inv["montant_ttc"] = float(total_ttc)
+    ttc = float(total_ttc)
 
     # --- Montant dû (BT-115) + conditions de paiement (BT-20) : BR-CO-25 ------
     # BR-CO-25 : si le montant dû (BT-115) est positif, le XML DOIT contenir

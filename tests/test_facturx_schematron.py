@@ -207,3 +207,62 @@ def test_schematron_negative_control_raw_unit_is_rejected():
     assert 'unitCode="m²"'.encode() in xml
     with pytest.raises(Exception, match="unitCode"):
         facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. P1 — Recalcul des totaux en Decimal (BR-CO-13 / BR-S-08 / BR-CO-15)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _valid(xml) -> bool:
+    return (
+        facturx.xml_check_xsd(xml, flavor=FLAVOR, level=LEVEL) is True
+        and facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL) is True
+    )
+
+
+def test_p1_incoherent_gemini_totals_are_overwritten():
+    """Les totaux incohérents de Gemini sont écrasés par le recalcul Decimal →
+    cohérence BR-CO-13/BR-CO-15 et schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        lignes=[
+            {"numero": "1", "description": "A", "quantite": 3, "unite": "C62",
+             "prix_unitaire_ht": 10.0, "montant_net_ht": 30.0, "taux_tva": 20.0, "code_tva": "S"},
+            {"numero": "2", "description": "B", "quantite": 1, "unite": "C62",
+             "prix_unitaire_ht": 7.77, "montant_net_ht": 7.77, "taux_tva": 20.0, "code_tva": "S"},
+        ],
+        montant_ht=999.0, montant_tva=1.0, montant_ttc=1234.0,  # valeurs fausses
+    ))
+    assert inv["montant_ht"] == 37.77
+    assert inv["montant_tva"] == 7.55   # 37.77 × 20 % arrondi HALF_UP
+    assert inv["montant_ttc"] == 45.32
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p1_ttc_lines_are_reconverted_to_ht():
+    """Lignes exprimées en TTC (Leroy Merlin chantier) → reconverties en HT
+    avant agrégation → schematron OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        lignes=[{"numero": "1", "description": "Ciment", "quantite": 10, "unite": "C62",
+                 "prix_unitaire_ht": 12.0, "montant_net_ht": 120.0, "taux_tva": 20.0, "code_tva": "S"}],
+        montant_ht=100.0, montant_tva=20.0, montant_ttc=120.0,  # net ligne == TTC
+    ))
+    assert inv["montant_ht"] == 100.0          # 120 / 1.20
+    assert inv["lignes"][0]["montant_net_ht"] == 100.0
+    assert inv["montant_ttc"] == 120.0
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
+
+
+def test_p1_multi_rate_vat_breakdown_valid():
+    """Ventilation TVA multi-taux recalculée depuis les lignes → BR-S-08 OK."""
+    inv = fx.normalize_invoice_data(_inv(
+        lignes=[
+            {"numero": "1", "description": "Std", "quantite": 1, "unite": "C62",
+             "prix_unitaire_ht": 100.0, "montant_net_ht": 100.0, "taux_tva": 20.0, "code_tva": "S"},
+            {"numero": "2", "description": "Réduit", "quantite": 1, "unite": "C62",
+             "prix_unitaire_ht": 50.0, "montant_net_ht": 50.0, "taux_tva": 5.5, "code_tva": "S"},
+        ],
+    ))
+    assert inv["montant_tva"] == 22.75         # 20 + 2.75
+    assert inv["montant_ttc"] == 172.75
+    assert len(inv["ventilation_tva"]) == 2
+    assert _valid(fx.generate_facturx_xml_en16931(inv))
