@@ -65,6 +65,7 @@ jobs:
             tests/test_br_co_25.py \
             tests/test_facturx_schematron.py \
             tests/test_verify_facturx_pdf.py \
+            tests/test_unece_units.py \
             -v
 
       - name: Validate embedded Factur-X XML (PDFs dans le repo)

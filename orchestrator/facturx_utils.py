@@ -43,6 +43,8 @@ import fitz  # PyMuPDF : extraction texte natif + OCR via Tesseract
 
 from facturx import generate_from_binary  # Akretion : embedding PDF/A-3 + XML
 
+from unece_units import to_unece  # Normalisation unité → code UN/ECE Rec 20
+
 logger = logging.getLogger("orchestrator")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -630,7 +632,7 @@ Le JSON doit contenir les données nécessaires au profil Factur-X EN16931
       "numero": "1",
       "description": "Description de l'article ou du service",
       "quantite": 1.0,
-      "unite": "C62 pour unité, HUR pour heure, KGM pour kg, MTR pour mètre",
+      "unite": "unité TELLE QU'IMPRIMÉE sur la facture (ex: 'm²', 'ml', 'U', 'h', 'kg') — ne pas convertir",
       "prix_unitaire_ht": 100.00,
       "montant_net_ht": 100.00,
       "taux_tva": 20.0,
@@ -958,7 +960,11 @@ def normalize_invoice_data(inv: dict) -> dict:
             line.setdefault("numero", str(i + 1))
             line.setdefault("description", "Article")
             line.setdefault("quantite", 1.0)
-            line.setdefault("unite", "C62")
+            # P0 (fix cii @unitCode) : mapper l'unité libre de Gemini (« m² »,
+            # « UNI », « ml »…) vers un code UN/ECE Rec 20 AVANT le CII. La valeur
+            # brute ne doit jamais atteindre BilledQuantity/@unitCode (rejet
+            # schematron « @unitCode is not allowed »).
+            line["unite"] = to_unece(line.get("unite") or "C62")
             line.setdefault("code_tva", "S")
             line.setdefault("taux_tva", 20.0)
             pu = _safe_float(line.get("prix_unitaire_ht"))

@@ -162,3 +162,48 @@ def test_schematron_pdf_embedded_paid_invoice_valid():
     xml = fx.generate_facturx_xml_en16931(inv)
     embedded_pdf = fx.embed_facturx_in_pdf(_make_source_pdf(), xml)
     facturx.get_xml_from_pdf(embedded_pdf, check_xsd=True, check_schematron=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. P0 — unitCode UN/ECE Rec 20 : cas cible IN-IPSO (facturé au m²)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _inv_m2(**over) -> dict:
+    """Facture type IN-IPSO : mélaminé facturé au m² (unité brute « m² »)."""
+    return _inv(
+        numero_facture="FPA0002846",
+        lignes=[{
+            "numero": "1", "description": "Panneau mélaminé", "quantite": 12.5,
+            "unite": "m²", "prix_unitaire_ht": 24.0, "montant_net_ht": 300.0,
+            "taux_tva": 20.0, "code_tva": "S",
+        }],
+        montant_ht=300.0, montant_tva=60.0, montant_ttc=360.0,
+        **over,
+    )
+
+
+def test_schematron_m2_invoice_maps_to_mtk_and_validates():
+    """Cas cible IN-IPSO : « m² » brut → MTK après normalize → schematron OK.
+
+    C'est la non-régression du rejet « @unitCode is not allowed » (252 occ.).
+    """
+    inv = fx.normalize_invoice_data(_inv_m2())
+    assert inv["lignes"][0]["unite"] == "MTK"  # m² mappé avant CII
+    xml = fx.generate_facturx_xml_en16931(inv)
+    assert b'unitCode="MTK"' in xml
+    assert facturx.xml_check_xsd(xml, flavor=FLAVOR, level=LEVEL) is True
+    assert facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL) is True
+
+
+def test_schematron_negative_control_raw_unit_is_rejected():
+    """Contrôle négatif : l'unité BRUTE « m² » (état d'avant P0), injectée
+    dans le CII SANS passer par normalize, DOIT être rejetée par le schematron
+    (« @unitCode is not allowed ») — preuve que c'est bien le mapping qui corrige.
+    """
+    raw = _inv_m2()
+    # On saute volontairement normalize_invoice_data : l'unité reste « m² ».
+    assert raw["lignes"][0]["unite"] == "m²"
+    xml = fx.generate_facturx_xml_en16931(raw)
+    assert 'unitCode="m²"'.encode() in xml
+    with pytest.raises(Exception, match="unitCode"):
+        facturx.xml_check_schematron(xml, flavor=FLAVOR, level=LEVEL)
