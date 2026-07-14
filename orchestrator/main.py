@@ -160,7 +160,7 @@ def _find_pdf_attachments(
 # Boucle de polling Gmail
 # ─────────────────────────────────────────────────────────────────────────────
 
-def poll_gmail(services: GoogleServices, workflow, state_db: StateDB):
+def poll_gmail(services: GoogleServices, workflow, state_db: StateDB, registry):
     """
     Un cycle de polling :
       1. Vérifie le quota Gemini journalier
@@ -419,7 +419,7 @@ def main():
                 creds.refresh(Request())
                 TOKEN_FILE.write_text(creds.to_json())
 
-            poll_gmail(services, workflow, state_db)
+            poll_gmail(services, workflow, state_db, registry)
 
         except Exception as e:
             logger.error("Erreur dans la boucle principale : %s", e)
